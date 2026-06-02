@@ -1,0 +1,26 @@
+# Secrets & credentials
+credentials.json
+token.json
+_token.json
+anthropic_key.txt
+.env
+
+# Personal configuration & history (use preferences.example.yaml as a template)
+preferences.yaml
+feedback.yaml
+
+# Generated output (digests, downloaded archives, read state)
+serve/
+digests/
+
+# Local agent / editor settings
+.claude/settings.local.json
+
+# Python
+*.pyc
+__pycache__/
+venv/
+.venv/
+*.egg-info/
+build/
+dist/

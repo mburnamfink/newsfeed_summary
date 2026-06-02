@@ -1,0 +1,24 @@
+# Archive Server — serves Digests and Archives to the tablet over home WiFi.
+#
+# Install (user service, no root):
+#   mkdir -p ~/.config/systemd/user
+#   ln -s %h/dev/newsfeed_summary/deploy/newsfeed-server.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now newsfeed-server
+#   loginctl enable-linger $USER   # keep running after logout / across reboots
+#
+# Tablet reaches it at http://pop-os.local:8080/ via mDNS (needs avahi-daemon).
+
+[Unit]
+Description=Newsfeed Archive Server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+WorkingDirectory=%h/dev/newsfeed_summary
+ExecStart=%h/work/bin/python -m newsfeed.server
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

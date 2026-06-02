@@ -1,0 +1,31 @@
+# Copy to preferences.yaml and edit. preferences.yaml is gitignored (it's personal).
+
+gmail:
+  # Gmail labels to fetch newsletters from. Create these in Gmail and use
+  # filters to route incoming newsletters into them.
+  labels:
+    - newsletters/culture
+    - newsletters/politics
+    - newsletters/tech
+
+# Topics you care about. The scorer uses these to rank each newsletter 0-10.
+interests:
+  - artificial intelligence
+  - software development
+  - climate change
+  - science fiction
+
+# Score tier cutoffs (see CONTEXT.md). high >= 7, medium >= 4, else low.
+thresholds:
+  high: 7
+  medium: 4
+
+# Nudge specific senders up or down regardless of topic match.
+boost_sources:
+  - Some Favorite Author
+mute_sources: []
+
+# Nudge articles up or down when these keywords appear.
+boost_keywords: []
+mute_keywords:
+  - cryptocurrency
