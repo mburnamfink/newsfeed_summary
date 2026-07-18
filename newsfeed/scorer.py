@@ -1,49 +1,82 @@
+import asyncio
 import json
 import logging
 
-from anthropic import Anthropic
-
+from .llm import LLMBackend
 from .models import Email, Preferences, ScoredEmail
 from .parser import truncate_body
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-haiku-4-5-20251001"
 SCORE_BODY_LIMIT = 4000
 BATCH_SIZE = 20
 
+# An article whose tags land in the reader's interests gets a bounded nudge, so
+# the vocabulary drives ranking rather than only living in the prose prompt. Each
+# matching interest tag adds INTEREST_BOOST_PER_TAG, capped at INTEREST_BOOST_MAX
+# to keep a heavily-tagged article from pinning to 10.
+INTEREST_BOOST_PER_TAG = 0.5
+INTEREST_BOOST_MAX = 1.5
 
-def score_emails(
+
+def validate_tags(raw_tags: object, vocab: list[str]) -> list[str]:
+    """Keep only in-vocabulary tags, de-duplicated and order-preserving.
+
+    The LLM is constrained to the vocabulary but can still return junk; anything
+    off-list is dropped rather than trusted.
+    """
+    allowed = set(vocab)
+    if not isinstance(raw_tags, list):
+        return []
+    return [t for t in dict.fromkeys(raw_tags) if isinstance(t, str) and t in allowed]
+
+
+def boost_for_interests(score: float, tags: list[str], interests: list[str]) -> float:
+    """Nudge the score up when an article's tags intersect the reader's interests."""
+    matches = len(set(tags) & set(interests))
+    if not matches:
+        return score
+    boost = min(matches * INTEREST_BOOST_PER_TAG, INTEREST_BOOST_MAX)
+    return min(10.0, score + boost)
+
+
+async def score_emails(
     emails: list[Email],
     preferences: Preferences,
-    client: Anthropic,
+    backend: LLMBackend,
     examples: list[dict] | None = None,
 ) -> list[ScoredEmail]:
     if not emails:
         return []
 
-    scored: list[ScoredEmail] = []
-    for i in range(0, len(emails), BATCH_SIZE):
-        batch = emails[i : i + BATCH_SIZE]
-        logger.info(f"Scoring batch {i // BATCH_SIZE + 1} ({len(batch)} articles)")
-        scored.extend(_score_batch(batch, preferences, client, examples or []))
+    batches = [emails[i : i + BATCH_SIZE] for i in range(0, len(emails), BATCH_SIZE)]
+    logger.info(f"Scoring {len(emails)} articles across {len(batches)} batches concurrently")
+    results = await asyncio.gather(
+        *(_score_batch(batch, preferences, backend, examples or []) for batch in batches)
+    )
+    return [scored for batch in results for scored in batch]
 
-    return scored
 
-
-def _score_batch(
+async def _score_batch(
     emails: list[Email],
     preferences: Preferences,
-    client: Anthropic,
+    backend: LLMBackend,
     examples: list[dict],
 ) -> list[ScoredEmail]:
     from .feedback import format_examples
 
     examples_block = format_examples(examples)
+    vocab = preferences.tags
+    vocab_block = (
+        f"\nTag vocabulary (assign each article a subset of THESE labels only — never "
+        f"invent new ones; use [] if none fit):\n{', '.join(vocab)}\n"
+        if vocab
+        else ""
+    )
     system_text = f"""You score newsletter articles for a reader based on their preferences.
 
 {_format_preferences(preferences)}
-{chr(10) + examples_block + chr(10) if examples_block else ""}
+{chr(10) + examples_block + chr(10) if examples_block else ""}{vocab_block}
 Scoring scale:
 - 8-10: High interest (must read)
 - 4-7: Medium interest (worth a look)
@@ -52,7 +85,7 @@ Scoring scale:
 Return a JSON object with this exact structure:
 {{
   "scores": [
-    {{"message_id": "...", "interest_score": 7.5, "topic": "brief topic category", "one_line": "one sentence describing the article"}}
+    {{"message_id": "...", "interest_score": 7.5, "topic": "brief topic category", "one_line": "one sentence describing the article", "tags": ["tag-from-vocabulary"]}}
   ]
 }}
 
@@ -68,15 +101,13 @@ Return only the JSON object, no other text."""
         for i, e in enumerate(emails)
     ]
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=2048,
-        system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
-        messages=[{"role": "user", "content": f"Score these articles:\n{json.dumps(articles, ensure_ascii=False)}"}],
+    raw_text = await backend.acomplete(
+        system_text,
+        f"Score these articles:\n{json.dumps(articles, ensure_ascii=False)}",
     )
 
     try:
-        raw = response.content[0].text.strip()
+        raw = raw_text.strip()
         if raw.startswith("```"):
             raw = raw.split("```", 2)[1]
             if raw.startswith("json"):
@@ -84,18 +115,26 @@ Return only the JSON object, no other text."""
         result = json.loads(raw)
         scores_by_idx = {s["message_id"]: s for s in result["scores"]}
     except (json.JSONDecodeError, KeyError) as e:
-        logger.error(f"Failed to parse scoring response: {e}\nRaw: {response.content[0].text[:500]}")
+        logger.error(f"Failed to parse scoring response: {e}\nRaw: {raw_text[:500]}")
         scores_by_idx = {}
 
-    return [
-        ScoredEmail(
-            email=email,
-            interest_score=float(scores_by_idx.get(str(i), {}).get("interest_score", 5.0)),
-            topic=scores_by_idx.get(str(i), {}).get("topic", "General"),
-            one_line=scores_by_idx.get(str(i), {}).get("one_line", email.subject),
+    results = []
+    for i, email in enumerate(emails):
+        s = scores_by_idx.get(str(i), {})
+        tags = validate_tags(s.get("tags"), preferences.tags)
+        score = boost_for_interests(
+            float(s.get("interest_score", 5.0)), tags, preferences.interests
         )
-        for i, email in enumerate(emails)
-    ]
+        results.append(
+            ScoredEmail(
+                email=email,
+                interest_score=score,
+                topic=s.get("topic", "General"),
+                one_line=s.get("one_line", email.subject),
+                tags=tags,
+            )
+        )
+    return results
 
 
 def _format_preferences(prefs: Preferences) -> str:

@@ -8,17 +8,66 @@ gmail:
     - newsletters/politics
     - newsletters/tech
 
-# Topics you care about. The scorer uses these to rank each newsletter 0-10.
+# The subset of the tag vocabulary (below) whose articles the scorer should
+# boost. Use the same spellings as `tags:` so the two never drift.
 interests:
-  - artificial intelligence
-  - software development
-  - climate change
-  - science fiction
+  - artificial-intelligence
+  - software-engineering
+  - climate-energy
+  - science-fiction
+
+# Controlled retrieval vocabulary. The LLM tags each article with a subset of
+# these labels only — it cannot invent new ones. Tags drive the Library's
+# browse-by-tag and faceting; `interests` above is the boosted subset. Aim for a
+# few dozen labels that cover most of your backlog. Edit freely, then run
+# `newsfeed retag` to re-tag already-stored articles.
+tags:
+  - artificial-intelligence   # anything centrally about AI/ML systems
+  - software-engineering      # the craft: code, languages, architecture, tooling
+  - software-teams            # the org: eng management, leadership, tech careers
+  - technology                # tech that is NOT AI/software/infra (hardware, biotech, science)
+  - infrastructure
+  - futurism
+  - science-fiction
+  - internet-culture
+  - media-criticism
+  - political-economy
+  - us-politics
+  - geopolitics
+  - accountability            # corruption/fraud/litigation exposed
+  - climate-energy
+  - history
+  - indie-music
+  - roleplaying-games
+  - consumer-products
+  - military-airpower
+  - real-estate
+  - cybersecurity
+
+# Which Claude backend scores and summarizes.
+#   subscription — Claude Pro/Max via the Claude Agent SDK (Claude Code), no
+#                  per-token billing. Needs the Claude Code CLI and a logged-in
+#                  session or CLAUDE_CODE_OAUTH_TOKEN (`claude setup-token`).
+#   api          — Anthropic Messages API, billed per token, needs ANTHROPIC_API_KEY.
+# `model` is optional; it defaults to claude-sonnet-4-6 (subscription) or
+# claude-haiku-4-5 (api).
+llm:
+  backend: subscription
+  # model: claude-sonnet-4-6
 
 # Score tier cutoffs (see CONTEXT.md). high >= 7, medium >= 4, else low.
 thresholds:
   high: 7
   medium: 4
+
+# The Archive Server that publishes digests over your LAN. Optional.
+#   port — what the server binds and where a fresh digest opens (default 8080).
+#   url  — override the base URL a fresh digest opens at; set this to reach the
+#          server by hostname, e.g. http://pop-os.local:8080. Defaults to
+#          http://localhost:<port>.
+server:
+  port: 8080
+  # url: http://pop-os.local:8080
 
 # Nudge specific senders up or down regardless of topic match.
 boost_sources:

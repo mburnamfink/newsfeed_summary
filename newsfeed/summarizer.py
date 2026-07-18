@@ -1,37 +1,40 @@
+import asyncio
 import json
 import logging
 
-from anthropic import Anthropic
-
+from .llm import LLMBackend
 from .models import Preferences, ScoredEmail
 from .parser import truncate_body
 
 logger = logging.getLogger(__name__)
 
-MODEL = "claude-haiku-4-5-20251001"
 SUMMARIZE_BODY_LIMIT = 8000
 
 
-def summarize_emails(
+async def summarize_emails(
     scored: list[ScoredEmail],
     preferences: Preferences,
-    client: Anthropic,
+    backend: LLMBackend,
 ) -> list[ScoredEmail]:
     high = [s for s in scored if s.tier == "high"]
     medium = [s for s in scored if s.tier == "medium"]
 
+    tasks = []
     if high:
-        _summarize_batch(high, "paragraph", client)
-        logger.info(f"Summarized {len(high)} high-interest articles")
-
+        tasks.append(_summarize_batch(high, "paragraph", backend))
     if medium:
-        _summarize_batch(medium, "sentence", client)
+        tasks.append(_summarize_batch(medium, "sentence", backend))
+    await asyncio.gather(*tasks)
+
+    if high:
+        logger.info(f"Summarized {len(high)} high-interest articles")
+    if medium:
         logger.info(f"Summarized {len(medium)} medium-interest articles")
 
     return scored
 
 
-def _summarize_batch(items: list[ScoredEmail], length: str, client: Anthropic) -> None:
+async def _summarize_batch(items: list[ScoredEmail], length: str, backend: LLMBackend) -> None:
     instruction = (
         "a paragraph (3-5 sentences) capturing the key points and why it matters"
         if length == "paragraph"
@@ -59,15 +62,10 @@ def _summarize_batch(items: list[ScoredEmail], length: str, client: Anthropic) -
         'Return a JSON object: {"summaries": [{"message_id": "...", "summary": "..."}]}'
     )
 
-    response = client.messages.create(
-        model=MODEL,
-        max_tokens=2048,
-        system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
-        messages=[{"role": "user", "content": prompt}],
-    )
+    raw_text = await backend.acomplete(system_text, prompt)
 
     try:
-        raw = response.content[0].text.strip()
+        raw = raw_text.strip()
         if raw.startswith("```"):
             raw = raw.split("```", 2)[1]
             if raw.startswith("json"):

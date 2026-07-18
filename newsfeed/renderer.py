@@ -5,7 +5,29 @@ from jinja2 import Environment
 
 from .models import ScoredEmail
 
-_TEMPLATE = """<!DOCTYPE html>
+_TEMPLATE = """\
+{%- macro paywall(email) -%}
+{%- if email.paywalled %}<span class="badge badge-lock" title="The email is only a paid-subscriber teaser">🔒 Paywalled</span>{% endif -%}
+{%- endmacro -%}
+{%- macro reactions() -%}
+      <div class="item-actions">
+        <button class="star" onclick="toggleStar(this)" title="Star to follow up later">★</button>
+        <button class="react react-down" data-sentiment="down" onclick="rate(this)" title="Not interested — rank lower">👎</button>
+        <button class="react react-confirm" data-sentiment="confirmed" onclick="rate(this)" title="Read it — score was right">✓ Read &amp; right</button>
+        <button class="react react-up" data-sentiment="up" onclick="rate(this)" title="Loved it — rank higher">👍</button>
+      </div>
+{%- endmacro -%}
+{%- macro chips(item) -%}
+{%- if item.tags %}
+      <div class="chips">
+        {%- for tag in item.tags %}
+        <span class="chip" data-tag="{{ tag }}" onclick="removeTag(this)" title="Tap to remove"><a href="/library/tag/{{ tag|urlencode }}" onclick="event.stopPropagation()">{{ tag }}</a> ✕</span>
+        {%- endfor %}
+        <span class="chip chip-add" onclick="addTag(this)" title="Add a tag">+</span>
+      </div>
+{%- endif -%}
+{%- endmacro -%}
+<!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="UTF-8">
@@ -53,6 +75,7 @@ _TEMPLATE = """<!DOCTYPE html>
     .badge-high   { background: #2a9; }
     .badge-medium { background: #c90; }
     .badge-low    { background: #999; }
+    .badge-lock   { background: #b4553a; }
     .card-summary { color: #333; }
 
     /* Medium interest list */
@@ -75,37 +98,52 @@ _TEMPLATE = """<!DOCTYPE html>
     .low-sender { font-weight: bold; color: #444; }
 
     /* Read tracking and per-item actions */
-    .is-read { opacity: 0.35; transition: opacity 0.3s; }
+    .is-read { opacity: 0.4; transition: opacity 0.3s; }
     .item-actions {
       margin-top: 8px;
       display: flex;
       align-items: center;
       gap: 6px;
-      font-size: 0.78rem;
-      color: #999;
     }
-    .item-actions input[type=number] {
-      width: 46px;
-      padding: 2px 4px;
-      font-size: 0.78rem;
-      border: 1px solid #ccc;
-      border-radius: 3px;
-    }
-    .item-actions button {
-      padding: 2px 7px;
-      font-size: 0.78rem;
+    .react {
+      padding: 3px 10px;
+      font-size: 0.85rem;
+      line-height: 1.3;
       cursor: pointer;
       border: 1px solid #ccc;
-      border-radius: 3px;
+      border-radius: 4px;
       background: #f5f5f5;
       color: #555;
     }
-    .item-actions button:disabled { opacity: 0.5; cursor: default; }
+    .react:hover { background: #ececec; }
+    .react.active { color: white; border-color: transparent; font-weight: bold; }
+    .react-down.active    { background: #c0563d; }
+    .react-confirm.active { background: #3b7dd8; }
+    .react-up.active      { background: #2a9d5c; }
+    .star {
+      padding: 3px 10px; font-size: 0.85rem; cursor: pointer;
+      border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; color: #999;
+    }
+    .star:hover { background: #ececec; }
+    .star.active { background: #f6b40a; border-color: transparent; color: #222; font-weight: bold; }
+
+    /* Tag chips */
+    .chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
+    .chip { font-size: 0.76rem; padding: 1px 8px; border: 1px solid #cbd; border-radius: 10px;
+            background: #eef2ff; color: #335; cursor: pointer; }
+    .chip a { color: inherit; text-decoration: none; }
+    .chip:hover { background: #dde6ff; }
+
+    /* Library nav */
+    .nav { font-size: 0.9rem; margin-bottom: 24px; }
+    .nav a { margin-right: 14px; color: #2a6; text-decoration: none; }
+    .nav a:hover { text-decoration: underline; }
   </style>
 </head>
 <body>
+  <div class="nav"><a href="/">🏠 Home</a><a href="/library">📚 Library</a><a href="/library?starred=1">★ Starred</a></div>
   <h1>Newsletter Digest</h1>
-  <div class="meta-line">{{ date }} &nbsp;·&nbsp; {{ total }} articles &nbsp;·&nbsp; generated {{ generated_at }}</div>
+  <div class="meta-line">{{ date }} &nbsp;·&nbsp; {{ total }} articles{% if paywalled %} &nbsp;·&nbsp; 🔒 {{ paywalled }} paywalled{% endif %} &nbsp;·&nbsp; generated {{ generated_at }}</div>
 
   <h2>Must Read <span class="count">({{ high|length }})</span></h2>
   {% if high %}
@@ -115,15 +153,12 @@ _TEMPLATE = """<!DOCTYPE html>
       <div class="card-meta">
         {{ item.email.sender_name }}
         <span class="badge badge-high">{{ "%.1f"|format(item.interest_score) }}</span>
+        {{ paywall(item.email) }}
         &nbsp;·&nbsp; {{ item.topic }}
       </div>
       <div class="card-summary">{{ item.summary or item.one_line }}</div>
-      <div class="item-actions">
-        <span>Rate:</span>
-        <input type="number" class="rate-input" min="0" max="10" step="0.5" placeholder="0–10">
-        <button onclick="submitFeedback(this)">→</button>
-        <button onclick="markRead(this)">Read ✓</button>
-      </div>
+      {{ chips(item) }}
+      {{ reactions() }}
     </div>
     {% endfor %}
   {% else %}
@@ -137,13 +172,11 @@ _TEMPLATE = """<!DOCTYPE html>
     <li data-msgid="{{ item.email.message_id }}" data-subject="{{ item.email.subject }}" data-sender="{{ item.email.sender_name }}">
       <span class="medium-sender">{{ item.email.sender_name }}</span>
       <span class="badge badge-medium">{{ "%.1f"|format(item.interest_score) }}</span>
+      {{ paywall(item.email) }}
       &nbsp; <span class="medium-subject"><a href="{{ item.email.archive_path or item.email.url or 'https://mail.google.com/mail/u/0/#all/' ~ item.email.message_id }}" target="_blank" rel="noopener">{{ item.email.subject }}</a></span>
       <span class="medium-summary">{{ item.summary or item.one_line }}</span>
-      <div class="item-actions">
-        <input type="number" class="rate-input" min="0" max="10" step="0.5" placeholder="0–10">
-        <button onclick="submitFeedback(this)">→</button>
-        <button onclick="markRead(this)">✓</button>
-      </div>
+      {{ chips(item) }}
+      {{ reactions() }}
     </li>
     {% endfor %}
   </ul>
@@ -155,12 +188,9 @@ _TEMPLATE = """<!DOCTYPE html>
   {% if low %}
   <ul class="low-list">
     {% for item in low %}
-    <li data-msgid="{{ item.email.message_id }}" data-subject="{{ item.email.subject }}" data-sender="{{ item.email.sender_name }}"><span class="low-sender">{{ item.email.sender_name }}:</span> <a href="{{ item.email.archive_path or item.email.url or 'https://mail.google.com/mail/u/0/#all/' ~ item.email.message_id }}" target="_blank" rel="noopener" style="color:#666;text-decoration:none;">{{ item.one_line }}</a>
-      <div class="item-actions">
-        <input type="number" class="rate-input" min="0" max="10" step="0.5" placeholder="0–10">
-        <button onclick="submitFeedback(this)">→</button>
-        <button onclick="markRead(this)">✓</button>
-      </div>
+    <li data-msgid="{{ item.email.message_id }}" data-subject="{{ item.email.subject }}" data-sender="{{ item.email.sender_name }}"><span class="low-sender">{{ item.email.sender_name }}:</span> <a href="{{ item.email.archive_path or item.email.url or 'https://mail.google.com/mail/u/0/#all/' ~ item.email.message_id }}" target="_blank" rel="noopener" style="color:#666;text-decoration:none;">{{ item.one_line }}</a> {{ paywall(item.email) }}
+      {{ chips(item) }}
+      {{ reactions() }}
     </li>
     {% endfor %}
   </ul>
@@ -169,48 +199,87 @@ _TEMPLATE = """<!DOCTYPE html>
   {% endif %}
 
 <script>
-async function loadReadState() {
+// Reflect stored reader state (read / starred / prior reaction) on the freshly
+// rendered digest, which is built from new scores and knows none of it.
+async function loadState() {
   try {
-    const r = await fetch('/read_state.json');
+    const r = await fetch('/api/state');
     if (!r.ok) return;
-    const ids = await r.json();
-    ids.forEach(id => {
-      document.querySelectorAll('[data-msgid="' + id.replace(/"/g, '\\"') + '"]')
-        .forEach(el => el.classList.add('is-read'));
+    const state = await r.json();
+    Object.entries(state).forEach(([id, s]) => {
+      document.querySelectorAll('[data-msgid="' + id.replace(/"/g, '\\"') + '"]').forEach(el => {
+        if (s.read) el.classList.add('is-read');
+        if (s.starred) el.querySelectorAll('.star').forEach(b => b.classList.add('active'));
+        if (s.feedback) {
+          el.querySelectorAll('.react').forEach(b =>
+            b.classList.toggle('active', b.dataset.sentiment === s.feedback));
+        }
+      });
     });
   } catch (_) {}
 }
 
-async function markRead(btn) {
+// One tap records a coarse reaction and marks the item read. Tapping the same
+// button again clears it (un-reads). The server persists both in one request.
+async function rate(btn) {
   const item = btn.closest('[data-msgid]');
   if (!item) return;
+  const wasActive = btn.classList.contains('active');
+  const sentiment = wasActive ? null : btn.dataset.sentiment;
   try {
-    await fetch('/api/mark-read', {
+    const r = await fetch('/api/rate', {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({message_id: item.dataset.msgid})
+      body: JSON.stringify({
+        message_id: item.dataset.msgid,
+        subject: item.dataset.subject,
+        sender: item.dataset.sender,
+        sentiment
+      })
     });
-    item.classList.add('is-read');
+    if (!r.ok) return;
+    item.querySelectorAll('.react').forEach(b => b.classList.remove('active'));
+    if (sentiment !== null) btn.classList.add('active');
+    item.classList.toggle('is-read', sentiment !== null);
   } catch (_) {}
 }
 
-async function submitFeedback(btn) {
+async function post(url, body) {
+  try {
+    const r = await fetch(url, {method: 'POST', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body)});
+    return r.ok;
+  } catch (_) { return false; }
+}
+
+async function toggleStar(btn) {
   const item = btn.closest('[data-msgid]');
   if (!item) return;
-  const input = item.querySelector('.rate-input');
-  const score = parseFloat(input.value);
-  if (isNaN(score) || score < 0 || score > 10) return;
-  try {
-    const r = await fetch('/api/feedback', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({subject: item.dataset.subject, sender: item.dataset.sender, score})
-    });
-    if (r.ok) { btn.textContent = '✓'; btn.disabled = true; input.disabled = true; }
-  } catch (_) {}
+  const starred = !btn.classList.contains('active');
+  if (await post('/api/star', {message_id: item.dataset.msgid, starred})) {
+    btn.classList.toggle('active', starred);
+  }
 }
 
-loadReadState();
+async function removeTag(chip) {
+  const item = chip.closest('[data-msgid]');
+  if (!item) return;
+  if (await post('/api/tag', {message_id: item.dataset.msgid, tag: chip.dataset.tag, op: 'remove'})) {
+    chip.remove();
+  }
+}
+
+async function addTag(btn) {
+  const item = btn.closest('[data-msgid]');
+  if (!item) return;
+  const tag = (prompt('Add tag:') || '').trim();
+  if (!tag) return;
+  if (await post('/api/tag', {message_id: item.dataset.msgid, tag, op: 'add'})) {
+    location.reload();
+  }
+}
+
+loadState();
 </script>
 </body>
 </html>"""
@@ -231,6 +300,7 @@ def render_digest(
     html = template.render(
         date=target_date.strftime("%B %d, %Y"),
         total=len(scored),
+        paywalled=sum(1 for s in scored if s.email.paywalled),
         generated_at=datetime.now().strftime("%I:%M %p"),
         high=high,
         medium=medium,
@@ -259,10 +329,13 @@ _INDEX_TEMPLATE = """<!DOCTYPE html>
     a { color: #2a6; text-decoration: none; }
     a:hover { text-decoration: underline; }
     .empty { color: #aaa; font-style: italic; }
+    .nav { font-size: 1rem; margin-bottom: 24px; }
+    .nav a { margin-right: 16px; }
   </style>
 </head>
 <body>
   <h1>Newsletter Digests</h1>
+  <div class="nav"><a href="/library">📚 Browse the Library</a><a href="/library?starred=1">★ Starred</a></div>
   {% if dates %}
   <ul>
     {% for d in dates %}

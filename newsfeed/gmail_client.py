@@ -3,13 +3,14 @@ from datetime import date, datetime, timedelta
 from email.utils import parsedate_to_datetime
 from pathlib import Path
 
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow
 from googleapiclient.discovery import build
 
 from .models import Email
-from .parser import extract_body, extract_view_online_url, parse_sender
+from .parser import detect_paywall, extract_body, extract_view_online_url, parse_sender
 
 logger = logging.getLogger(__name__)
 
@@ -22,22 +23,34 @@ def authenticate(credentials_path: Path, token_path: Path) -> Credentials:
     if token_path.exists():
         creds = Credentials.from_authorized_user_file(str(token_path), SCOPES)
 
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+    if creds and creds.valid:
+        return creds
+
+    if creds and creds.expired and creds.refresh_token:
+        try:
             creds.refresh(Request())
-        else:
-            if not credentials_path.exists():
-                raise FileNotFoundError(
-                    f"Gmail credentials not found at {credentials_path}\n"
-                    "Download credentials.json from Google Cloud Console:\n"
-                    "  https://console.cloud.google.com/apis/credentials"
-                )
-            flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
-            creds = flow.run_local_server(port=0)
+        except RefreshError as e:
+            # A revoked or expired refresh token (e.g. test-app tokens lapse after
+            # 7 days) raises here; fall back to a fresh browser authorization
+            # rather than crashing the run.
+            logger.warning(f"Stored Gmail token could not be refreshed ({e}); re-authorizing.")
+            creds = _authorize(credentials_path)
+    else:
+        creds = _authorize(credentials_path)
 
-        token_path.write_text(creds.to_json())
-
+    token_path.write_text(creds.to_json())
     return creds
+
+
+def _authorize(credentials_path: Path) -> Credentials:
+    if not credentials_path.exists():
+        raise FileNotFoundError(
+            f"Gmail credentials not found at {credentials_path}\n"
+            "Download credentials.json from Google Cloud Console:\n"
+            "  https://console.cloud.google.com/apis/credentials"
+        )
+    flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
+    return flow.run_local_server(port=0)
 
 
 def fetch_newsletter_emails(
@@ -146,4 +159,5 @@ def _parse_message(msg: dict) -> Email | None:
         body=body,
         url=url,
         raw_html=raw_html,
+        paywalled=detect_paywall(body),
     )

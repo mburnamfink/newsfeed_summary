@@ -6,8 +6,8 @@ Each run fetches the previous day's newsletters from labelled Gmail folders, sco
 one 0–10 against your interests with Claude, summarises the ones worth reading, and renders
 a clean HTML **digest**. Every newsletter is also saved as a self-contained **archive** (images
 inlined, scripts stripped) so it reads well offline on a tablet. A small always-on server
-publishes digests and archives over your LAN, and a feedback loop lets you correct scores from
-the tablet to calibrate future runs.
+publishes digests and archives over your LAN, and a one-tap feedback loop (👎 / ✓ Read &
+right / 👍) lets you react to items from the tablet to calibrate future runs.
 
 See [`CONTEXT.md`](CONTEXT.md) for the domain glossary and
 [`docs/adr/0001-local-archive-server.md`](docs/adr/0001-local-archive-server.md) for the
@@ -21,15 +21,15 @@ Gmail (labelled newsletters)
    ▼
 Email ──► archive (offline copy)   newsfeed/archiver.py ──► serve/archive/<date>/<id>/
    │
-   ▼  score 0–10 vs interests       newsfeed/scorer.py     (Claude Haiku)
+   ▼  score + tag vs vocabulary     newsfeed/scorer.py     (Claude, via newsfeed/llm.py)
 ScoredEmail
-   │  summarise high/medium         newsfeed/summarizer.py (Claude Haiku)
+   │  summarise high/medium         newsfeed/summarizer.py (Claude, via newsfeed/llm.py)
    ▼
 Digest (HTML, grouped by tier)      newsfeed/renderer.py  ──► serve/digests/<date>.html
    │
-   └─ append to feedback.yaml       newsfeed/feedback.py  (calibration history)
+   └─ upsert row + body index       newsfeed/library.py   ──► articles.db (source of truth)
 
-serve/  ──►  Archive Server (LAN, port 8080)   newsfeed/server.py
+articles.db + serve/  ──►  Archive Server + Library (LAN, port 8080)   newsfeed/server.py
 ```
 
 Scores fall into three **tiers**: High (≥7, "must read"), Medium (≥4, "worth a look"), Low
@@ -39,7 +39,11 @@ Scores fall into three **tiers**: High (≥7, "must read"), Medium (≥4, "worth
 
 - Python ≥ 3.12 and [`uv`](https://docs.astral.sh/uv/)
 - A Google Cloud OAuth client (`credentials.json`) with the Gmail API enabled
-- An Anthropic API key
+- Claude access, one of:
+  - a **Claude Pro/Max subscription** (default) — runs through the Claude Agent SDK,
+    which bundles its own Claude Code CLI; you only need to be authenticated (a
+    logged-in Claude Code session, or a `CLAUDE_CODE_OAUTH_TOKEN`), or
+  - an **Anthropic API key** (set `llm.backend: api` in `preferences.yaml`)
 
 ## Install
 
@@ -81,19 +85,47 @@ uv run newsfeed --help
    API, and download it as `credentials.json` into the project directory. The first run opens a
    browser to authorise read-only Gmail access and caches the result in `token.json`.
 
-3. **Anthropic key.** Either export it:
+3. **Claude access.** Pick a backend in `preferences.yaml` under `llm:` (default
+   `subscription`).
 
-   ```bash
-   export ANTHROPIC_API_KEY=sk-ant-...
-   ```
+   - **Subscription (default).** The Claude Agent SDK ships its own bundled Claude
+     Code CLI, so no global `npm` install is needed to *run* the pipeline — you just
+     need to be authenticated. If you already use Claude Code interactively on this
+     machine, its logged-in session works. For a headless/cron box, mint a
+     long-lived token (this step needs the standalone `claude` CLI —
+     `npm install -g @anthropic-ai/claude-code` if you don't have it):
+
+     ```bash
+     claude setup-token                 # opens a browser; prints a token
+     export CLAUDE_CODE_OAUTH_TOKEN=...  # put this in your shell rc or the cron env
+     ```
+
+     Make sure `ANTHROPIC_API_KEY` is **not** exported — if it is, Claude Code uses
+     per-token API billing instead of your subscription. (The pipeline also drops it
+     from its own environment for subscription runs.)
+
+   - **API.** Set `llm.backend: api` in `preferences.yaml` and provide a key, either
+     by exporting `ANTHROPIC_API_KEY=sk-ant-...` or dropping it in `anthropic_key.txt`.
 
 ## Usage
 
 ```bash
-newsfeed                    # digest for yesterday, opens in your browser
+newsfeed                    # digest for yesterday; runs in the background, opens when ready
 newsfeed --date 2026-05-13  # a specific day
-newsfeed --no-open          # don't launch a browser (use in cron / on a headless box)
+newsfeed --foreground       # stay attached to the terminal (see progress live)
+newsfeed --no-open          # don't launch a browser; implies --foreground (cron / headless)
+
+newsfeed migrate            # one-time: backfill articles.db from existing digests/archives
+newsfeed retag --all        # (re)tag stored articles against your tags: vocabulary
+newsfeed retag --since 2026-06-01
+newsfeed retag --tag technology
 ```
+
+By default `newsfeed` **detaches to the background** so your terminal returns immediately, logs
+to `logs/newsfeed-<date>.log`, and opens the finished digest in a browser. It opens the digest
+**through the Archive Server** (`http://localhost:8080/…` by default), not as a local file, so
+the feedback buttons work — the server must be running (see below). Point it elsewhere with the
+`server:` block in `preferences.yaml`.
 
 Output: `serve/digests/<date>.html`, archives under `serve/archive/`, and an index at
 `serve/index.html`.
@@ -127,24 +159,44 @@ systemctl --user enable --now newsfeed-server
 loginctl enable-linger "$USER"   # keep running across logout / reboot
 ```
 
-Browse from another device at `http://<host>.local:8080/` (mDNS; needs avahi-daemon). The
-server exposes two POST endpoints used by the digest pages:
+Browse from another device at `http://<host>.local:8080/` (mDNS; needs avahi-daemon). Beyond the
+static digests and archives it serves the **Library** and a set of one-tap write endpoints, all
+backed by `articles.db`:
 
-- `POST /api/feedback` `{subject, sender, score}` — record a corrected score in `feedback.yaml`
-- `POST /api/mark-read` `{message_id}` — mark a newsletter read in `serve/read_state.json`
+- `GET  /library` — search box + tag/author facets (`?starred=1` for the starred shelf)
+- `GET  /library/author/<sender>`, `/library/tag/<tag>`, `/library/search?q=` — browse & search
+- `POST /api/rate` `{message_id, sentiment}` — record a reaction (`up`/`down`/`confirmed`/`null`)
+  and mark the item read in one tap
+- `POST /api/mark-read` `{message_id, read}` — mark a newsletter read
+- `POST /api/star` `{message_id, starred}` — toggle the curated ★ shelf
+- `POST /api/tag` `{message_id, tag, op}` — add / remove / clear a reader tag correction
 
 > The server binds `0.0.0.0:8080` with no authentication — intended for a trusted home LAN.
 
+## The Library
+
+Every fetched article is retained, scored, tagged, and full-text indexed in `articles.db`
+(SQLite + FTS5) — the single source of truth for scores, tags, stars, feedback and read state
+(see [ADR 0002](docs/adr/0002-sqlite-knowledge-library.md) and
+[`docs/knowledge-library.md`](docs/knowledge-library.md)). Browse it by **author** or **tag**,
+**search** article bodies, and **star** the subset you want to follow up on — all from the
+tablet. Tags come from the fixed `tags:` vocabulary in `preferences.yaml`; the LLM assigns them
+and you correct them with the chips on any card. Edit the vocabulary, then `newsfeed retag` to
+re-apply it to the backlog.
+
+First-time setup on an existing install: `newsfeed migrate` reconstructs the database from your
+digests, archives, `feedback.yaml` and read state, then `newsfeed retag --all` tags the backlog.
+
 ## Feedback & calibration
 
-Each run appends its scored newsletters to `feedback.yaml`. Correcting a score from a digest
-page (via the server) updates that entry. Future runs feed a weighted sample of this history
-back to the scorer as calibration examples — biased toward recent items and ones where your
-correction disagreed with the model. Tuning knobs live at the top of
+Reacting to an item from a digest or Library page (👎 too low a bar / 👍 wanted it ranked higher /
+✓ score was right) records the reaction on that article in `articles.db`. Future runs feed a
+weighted sample of this history back to the scorer as calibration examples — biased toward recent
+items and ones where your reaction pushed against the model. Tuning knobs live at the top of
 [`newsfeed/feedback.py`](newsfeed/feedback.py).
 
 ## Privacy
 
-`credentials.json`, `token.json`, `anthropic_key.txt`, your `preferences.yaml`, the
-`feedback.yaml` history, and everything under `serve/` are personal and **gitignored**. Only
-`preferences.example.yaml` is tracked as a template.
+`credentials.json`, `token.json`, `anthropic_key.txt`, your `preferences.yaml`, the legacy
+`feedback.yaml`, the `articles.db` Library, and everything under `serve/` are personal and
+**gitignored**. Only `preferences.example.yaml` is tracked as a template.

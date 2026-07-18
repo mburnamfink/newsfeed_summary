@@ -1,12 +1,7 @@
 import logging
 import math
 import random
-from datetime import date, datetime
-from pathlib import Path
-
-import yaml
-
-from .models import ScoredEmail
+from datetime import date
 
 logger = logging.getLogger(__name__)
 
@@ -17,40 +12,19 @@ WEIGHT_RANDOM = 0.2
 RECENCY_HALFLIFE_DAYS = 30
 
 
-def append_run(scored: list[ScoredEmail], target_date: date, path: Path) -> None:
-    existing = _load_raw(path)
-    existing_keys = {(e["subject"], e["sender"]) for e in existing}
-
-    new_entries = [
-        {
-            "date": target_date.isoformat(),
-            "subject": s.email.subject,
-            "sender": s.email.sender_name,
-            "topic": s.topic,
-            "score": round(s.interest_score, 1),
-            "feedback": None,
-        }
-        for s in scored
-        if (s.email.subject, s.email.sender_name) not in existing_keys
-    ]
-
-    if not new_entries:
-        return
-
-    combined = new_entries + existing
-    path.write_text(yaml.dump(combined, allow_unicode=True, sort_keys=False, default_flow_style=False), encoding="utf-8")
-    logger.info(f"Appended {len(new_entries)} new entries to {path.name}")
-
-
-def select_examples(
-    path: Path,
+def select_examples_from_rows(
+    entries: list[dict],
     max_n: int = MAX_EXAMPLES,
     weight_disagreement: float = WEIGHT_DISAGREEMENT,
     weight_recency: float = WEIGHT_RECENCY,
     weight_random: float = WEIGHT_RANDOM,
     recency_halflife_days: int = RECENCY_HALFLIFE_DAYS,
 ) -> list[dict]:
-    entries = _load_raw(path)
+    """Weight and pick calibration examples from feedback rows (DB- or YAML-shaped).
+
+    Each row needs ``date``, ``subject``, ``sender``, ``topic``, ``score`` and
+    ``feedback`` keys — the shape the scorer's example formatter consumes.
+    """
     if not entries:
         return []
 
@@ -63,8 +37,7 @@ def select_examples(
             entry_date = today
 
         days_ago = max(0, (today - entry_date).days)
-        # null feedback = user confirmed the score was correct, disagreement = 0
-        disagreement = abs(float(e["feedback"]) - float(e["score"])) / 10.0 if e.get("feedback") is not None else 0.0
+        disagreement = _disagreement(e.get("feedback"), e.get("score"))
         recency = math.exp(-days_ago / recency_halflife_days)
         rnd = random.random()
 
@@ -79,31 +52,41 @@ def select_examples(
     return [e for _, e in scored[:max_n]]
 
 
+# Feedback is a coarse reaction the reader taps on a digest page: "up" (undervalued,
+# want more), "down" (overvalued, want less), or "confirmed" (score was right).
+# null means no reaction was given. Older history may store a numeric corrected score.
+def _disagreement(feedback: str | float | None, score: float | None) -> float:
+    """0.0 (score stood) … 1.0 (reader pushed hard against it)."""
+    if feedback is None or feedback == "confirmed":
+        return 0.0
+    if feedback in ("up", "down"):
+        return 1.0
+    if score is None:
+        return 0.0
+    try:
+        return abs(float(feedback) - float(score)) / 10.0
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def _example_line(e: dict) -> str:
+    head = f'- "{e["subject"]}" ({e["sender"]}) | topic: {e["topic"]} | system scored {e["score"]}'
+    fb = e.get("feedback")
+    if fb == "up":
+        return f"{head} — reader wanted it ranked HIGHER (surface more like this)"
+    if fb == "down":
+        return f"{head} — reader wanted it ranked LOWER (less like this)"
+    if fb == "confirmed":
+        return f"{head} — reader confirmed the score was right"
+    if fb is None:
+        return f"{head} (not corrected)"
+    direction = "too low" if float(fb) > float(e["score"]) else "too high"
+    return f"{head}, reader said {fb} ({direction})"
+
+
 def format_examples(examples: list[dict]) -> str:
     if not examples:
         return ""
     lines = ["Calibration examples from your past feedback (use to anchor the scoring scale):"]
-    for e in examples:
-        if e.get("feedback") is None:
-            lines.append(
-                f'- "{e["subject"]}" ({e["sender"]}) | topic: {e["topic"]} | '
-                f'system scored {e["score"]}, confirmed correct'
-            )
-        else:
-            direction = "too low" if float(e["feedback"]) > float(e["score"]) else "too high"
-            lines.append(
-                f'- "{e["subject"]}" ({e["sender"]}) | topic: {e["topic"]} | '
-                f'system scored {e["score"]}, you said {e["feedback"]} ({direction})'
-            )
+    lines.extend(_example_line(e) for e in examples)
     return "\n".join(lines)
-
-
-def _load_raw(path: Path) -> list[dict]:
-    if not path.exists():
-        return []
-    try:
-        data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        return data if isinstance(data, list) else []
-    except Exception as e:
-        logger.warning(f"Could not load {path.name}: {e}")
-        return []

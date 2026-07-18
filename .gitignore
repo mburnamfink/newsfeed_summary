@@ -9,9 +9,17 @@ anthropic_key.txt
 preferences.yaml
 feedback.yaml
 
+# Library source of truth: per-article scores, tags, stars, feedback, read state,
+# and the FTS body index. Personal; rebuildable from digests + archives.
+articles.db
+articles.db-*
+
 # Generated output (digests, downloaded archives, read state)
 serve/
 digests/
+
+# Background-run logs
+logs/
 
 # Local agent / editor settings
 .claude/settings.local.json
