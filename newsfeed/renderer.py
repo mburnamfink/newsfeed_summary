@@ -289,6 +289,7 @@ def render_digest(
     scored: list[ScoredEmail],
     target_date: date,
     output_dir: Path,
+    generated_at: str | None = None,
 ) -> Path:
     env = Environment(autoescape=True)
     template = env.from_string(_TEMPLATE)
@@ -301,7 +302,7 @@ def render_digest(
         date=target_date.strftime("%B %d, %Y"),
         total=len(scored),
         paywalled=sum(1 for s in scored if s.email.paywalled),
-        generated_at=datetime.now().strftime("%I:%M %p"),
+        generated_at=generated_at or datetime.now().strftime("%I:%M %p"),
         high=high,
         medium=medium,
         low=low,

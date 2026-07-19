@@ -70,8 +70,8 @@ def paths() -> Paths:
     return Paths(project_root())
 
 
-def _server_config() -> dict:
-    """The optional ``server:`` block from preferences.yaml, or empty."""
+def _preferences_block(key: str) -> dict:
+    """The optional ``<key>:`` block from preferences.yaml, or empty."""
     pref = paths().preferences
     if not pref.exists():
         return {}
@@ -79,7 +79,16 @@ def _server_config() -> dict:
         data = yaml.safe_load(pref.read_text(encoding="utf-8")) or {}
     except Exception:
         return {}
-    return data.get("server", {}) or {}
+    return data.get(key, {}) or {}
+
+
+def _server_config() -> dict:
+    return _preferences_block("server")
+
+
+def backup_config() -> dict:
+    """The optional ``backup:`` block from preferences.yaml, or empty."""
+    return _preferences_block("backup")
 
 
 def server_port() -> int:

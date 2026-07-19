@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from . import library, migrate, tagger
+from . import backup, library, migrate, rebuild, tagger
 from .archiver import archive_email
 from .config import paths, server_base_url
 from .feedback import select_examples_from_rows
@@ -76,6 +76,14 @@ def main() -> None:
 
     sub.add_parser("migrate", help="Backfill articles.db from digests/archives/feedback")
 
+    rebuild_p = sub.add_parser(
+        "rebuild", help="Re-render stored digests into the current format (no fetch/re-score)"
+    )
+    rebuild_p.add_argument("--since", type=date.fromisoformat, metavar="YYYY-MM-DD",
+                           help="Only rebuild digests dated on or after this day")
+
+    sub.add_parser("backup", help="Back up Library state + starred articles to the cloud remote")
+
     retag_p = sub.add_parser("retag", help="Recompute article tags against the current vocabulary")
     scope = retag_p.add_mutually_exclusive_group()
     scope.add_argument("--all", action="store_true", help="Re-tag every stored article (default)")
@@ -88,8 +96,14 @@ def main() -> None:
     if args.command == "migrate":
         _run_migration()
         return
+    if args.command == "rebuild":
+        _run_rebuild(args)
+        return
     if args.command == "retag":
         asyncio.run(_run_retag(args))
+        return
+    if args.command == "backup":
+        _run_backup()
         return
 
     # A normal interactive run detaches so the terminal comes straight back and a
@@ -116,6 +130,27 @@ def _run_migration() -> None:
         conn.close()
     logger.info(f"Backfill written to {p.db} — {stats.summary()}")
     logger.info("Next: `newsfeed retag --all` to tag the backlog against your vocabulary.")
+
+
+def _run_rebuild(args: argparse.Namespace) -> None:
+    p = paths()
+    conn = library.connect(p.db)
+    try:
+        since = args.since.isoformat() if args.since else None
+        total = rebuild.rebuild_all(conn, p.digests, since=since)
+    finally:
+        conn.close()
+    render_index(p.digests, p.serve)
+    logger.info(f"Rebuilt {total} items across stored digests.")
+
+
+def _run_backup() -> None:
+    p = paths()
+    conn = library.connect(p.db)
+    try:
+        backup.run_backup(conn, p)
+    finally:
+        conn.close()
 
 
 async def _run_retag(args: argparse.Namespace) -> None:
@@ -236,6 +271,13 @@ async def _generate_digest(args: argparse.Namespace) -> None:
     output_path = render_digest(scored, target_date, p.digests)
     render_index(p.digests, p.serve)
     logger.info(f"Digest saved to {output_path}")
+
+    # State is now fully current (db committed, digests + index rendered); snapshot
+    # it off-machine. Best-effort — a backup failure must not fail the digest run.
+    try:
+        _run_backup()
+    except Exception as e:
+        logger.warning(f"backup failed: {e}")
 
     # Open through the Archive Server, not the file:// path — the feedback and
     # read-tracking buttons POST to the server and are inert on a local file.

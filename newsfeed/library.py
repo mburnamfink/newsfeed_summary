@@ -351,6 +351,21 @@ def list_by_tag(conn: sqlite3.Connection, tag: str) -> list[Article]:
     return _rows_to_articles(conn, rows)
 
 
+def list_by_date(conn: sqlite3.Connection, day: str) -> list[Article]:
+    rows = conn.execute(
+        f"{_SELECT} WHERE date = ? ORDER BY score DESC", (day,)
+    ).fetchall()
+    return _rows_to_articles(conn, rows)
+
+
+def all_dates(conn: sqlite3.Connection) -> list[str]:
+    """Distinct article dates, oldest first."""
+    rows = conn.execute(
+        "SELECT DISTINCT date FROM articles WHERE date != '' ORDER BY date"
+    ).fetchall()
+    return [r["date"] for r in rows]
+
+
 def list_starred(conn: sqlite3.Connection) -> list[Article]:
     rows = conn.execute(
         f"{_SELECT} WHERE starred = 1 ORDER BY date DESC, score DESC"

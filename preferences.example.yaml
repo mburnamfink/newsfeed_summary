@@ -69,6 +69,18 @@ server:
   port: 8080
   # url: http://pop-os.local:8080
 
+# Off-machine backup via rclone (ADR 0003). Runs at the end of each digest, and
+# on demand via `newsfeed backup`. Copies Library state (feedback.yaml,
+# preferences.yaml, articles.db) and each starred article's archive to the remote;
+# the code lives in git and the full archive stays local, so neither is copied.
+# Requires rclone on PATH with a configured remote — if it's missing, the backup
+# is skipped with a warning and the digest run is unaffected. The whole block is
+# optional; these are the defaults.
+backup:
+  enabled: true
+  remote: "gdrive:"        # any configured rclone remote, e.g. "onedrive:"
+  path: newsfeed_summary   # destination folder within the remote
+
 # Nudge specific senders up or down regardless of topic match.
 boost_sources:
   - Some Favorite Author

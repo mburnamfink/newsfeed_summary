@@ -78,7 +78,10 @@ def parse_digest_html(html: str, digest_date: str) -> list[ParsedArticle]:
     """Extract one ParsedArticle per card/row in a rendered digest page."""
     soup = BeautifulSoup(html, "html.parser")
     articles: list[ParsedArticle] = []
-    for el in soup.select("[data-msgid]"):
+    # Select the item containers directly rather than [data-msgid]: digests from
+    # before the data-msgid era carry the message_id only in their archive link,
+    # which _parse_item recovers. New digests put data-msgid on these same nodes.
+    for el in soup.select(".card, .medium-list > li, .low-list > li"):
         if not isinstance(el, Tag):
             continue
         parsed = _parse_item(el, digest_date)
@@ -88,7 +91,10 @@ def parse_digest_html(html: str, digest_date: str) -> list[ParsedArticle]:
 
 
 def _parse_item(el: Tag, digest_date: str) -> ParsedArticle | None:
-    message_id = str(el.get("data-msgid") or "").strip()
+    archive_path = _archive_href(el)
+    # Digests rendered before the data-msgid era carry the message_id only inside
+    # their /archive/<date>/<id>/ link, so fall back to that.
+    message_id = str(el.get("data-msgid") or "").strip() or _msgid_from_archive(archive_path)
     if not message_id:
         return None
     subject = str(el.get("data-subject") or "").strip()
@@ -112,7 +118,7 @@ def _parse_item(el: Tag, digest_date: str) -> ParsedArticle | None:
         tier=tier,
         topic=_card_topic(el) if tier == "high" else "",
         score=_badge_score(el),
-        archive_path=_archive_href(el),
+        archive_path=archive_path,
         paywalled=el.find("span", class_="badge-lock") is not None,
     )
 
@@ -151,6 +157,16 @@ def _archive_href(el: Tag) -> str:
         if href.startswith("/archive/"):
             return href
     return ""
+
+
+def _msgid_from_archive(archive_path: str) -> str:
+    """Pull the message_id out of ``/archive/<date>/<id>/index.html``.
+
+    The ``<id>`` segment is the Gmail message_id; this is the only place it
+    survives in pre-data-msgid digests.
+    """
+    parts = archive_path.split("/archive/", 1)[-1].split("/")
+    return parts[1].strip() if len(parts) >= 2 else ""
 
 
 def load_digests(conn: sqlite3.Connection, digests_dir: Path, stats: MigrationStats) -> None:
