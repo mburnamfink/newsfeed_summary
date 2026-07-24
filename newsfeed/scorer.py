@@ -11,6 +11,10 @@ logger = logging.getLogger(__name__)
 SCORE_BODY_LIMIT = 4000
 BATCH_SIZE = 20
 
+# Fallback when the model gives no usable score. Thin or unscorable articles are
+# treated as low value rather than getting a neutral 5.0, so they sort to the bottom.
+DEFAULT_LOW_SCORE = 2.0
+
 # An article whose tags land in the reader's interests gets a bounded nudge, so
 # the vocabulary drives ranking rather than only living in the prose prompt. Each
 # matching interest tag adds INTEREST_BOOST_PER_TAG, capped at INTEREST_BOOST_MAX
@@ -82,6 +86,10 @@ Scoring scale:
 - 4-7: Medium interest (worth a look)
 - 0-3: Low interest (can skip)
 
+Every article MUST get a numeric interest_score from 0 to 10 — never null, never
+omitted. If an article is thin, promotional, or you are unsure, commit to a low
+score (0-3) rather than leaving it blank.
+
 Return a JSON object with this exact structure:
 {{
   "scores": [
@@ -122,9 +130,16 @@ Return only the JSON object, no other text."""
     for i, email in enumerate(emails):
         s = scores_by_idx.get(str(i), {})
         tags = validate_tags(s.get("tags"), preferences.tags)
-        score = boost_for_interests(
-            float(s.get("interest_score", 5.0)), tags, preferences.interests
-        )
+        raw_score = s.get("interest_score")
+        try:
+            interest = float(raw_score)
+        except (TypeError, ValueError):
+            logger.warning(
+                f"Unusable interest_score {raw_score!r} for '{email.subject}' "
+                f"from {email.sender_name}; defaulting to {DEFAULT_LOW_SCORE}"
+            )
+            interest = DEFAULT_LOW_SCORE
+        score = boost_for_interests(interest, tags, preferences.interests)
         results.append(
             ScoredEmail(
                 email=email,

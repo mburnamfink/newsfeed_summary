@@ -84,9 +84,18 @@ async def test_score_batch_assigns_validated_tags_and_boost():
     assert scored[0].interest_score == 7.5                  # 7.0 + 0.5 interest boost
 
 
+async def test_score_batch_survives_null_interest_score():
+    payload = json.dumps({"scores": [
+        {"message_id": "0", "interest_score": None, "topic": "AI", "one_line": "x", "tags": []},
+    ]})
+    prefs = Preferences(gmail_labels=[], interests=[], thresholds={"high": 7, "medium": 4}, tags=VOCAB)
+    scored = await scorer.score_emails([_email("m0")], prefs, FakeBackend(payload))
+    assert scored[0].interest_score == scorer.DEFAULT_LOW_SCORE
+
+
 async def test_score_batch_survives_bad_json():
     prefs = Preferences(gmail_labels=[], interests=[], thresholds={"high": 7, "medium": 4}, tags=VOCAB)
     scored = await scorer.score_emails([_email("m0", subject="Fallback")], prefs, FakeBackend("not json"))
-    assert scored[0].interest_score == 5.0
+    assert scored[0].interest_score == scorer.DEFAULT_LOW_SCORE
     assert scored[0].one_line == "Fallback"
     assert scored[0].tags == []
