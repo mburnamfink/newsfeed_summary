@@ -4,12 +4,12 @@ import logging
 import os
 import sys
 import webbrowser
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import yaml
 
-from . import backup, library, migrate, rebuild, tagger
+from . import backup, ingest, library, migrate, rebuild, tagger
 from .archiver import archive_email
 from .config import paths, server_base_url
 from .feedback import select_examples_from_rows
@@ -17,8 +17,8 @@ from .gmail_client import authenticate, fetch_newsletter_emails
 from .llm import build_backend
 from .models import Preferences
 from .renderer import render_digest, render_index
-from .scorer import score_emails
-from .summarizer import summarize_emails
+from .scorer import DEFAULT_LOW_SCORE, score_emails
+from .summarizer import summarize_articles, summarize_emails
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s  %(message)s")
 logger = logging.getLogger(__name__)
@@ -76,6 +76,14 @@ def main() -> None:
 
     sub.add_parser("migrate", help="Backfill articles.db from digests/archives/feedback")
 
+    add_p = sub.add_parser("add", help="Save an article from a URL into the Library")
+    add_p.add_argument("url", help="Article URL to fetch, archive, score and star")
+    add_p.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run attached to the terminal instead of detaching to the background",
+    )
+
     rebuild_p = sub.add_parser(
         "rebuild", help="Re-render stored digests into the current format (no fetch/re-score)"
     )
@@ -93,8 +101,31 @@ def main() -> None:
 
     args = parser.parse_args()
 
+    try:
+        p = paths()  # fail fast with a clear message if NEWSFEED_HOME is unset
+    except RuntimeError as e:
+        logger.error("%s", e)
+        sys.exit(2)
+
+    # Surface a stale-backup warning here, in the parent, before a digest/add run
+    # detaches and redirects its logs to a file where the user won't see them.
+    stale = backup.staleness_message(p)
+    if stale:
+        print(f"\n⚠  Backup warning: {stale}\n", file=sys.stderr)
+
     if args.command == "migrate":
         _run_migration()
+        return
+    if args.command == "add":
+        # Fetch + render + LLM scoring take a while; detach so the terminal returns
+        # immediately and progress lands in a per-capture log. --foreground stays
+        # attached (and is the fallback where fork isn't available).
+        logfile = paths().logs / f"newsfeed-add-{datetime.now():%Y%m%d-%H%M%S}.log"
+        if not args.foreground and _detach_to_background(
+            logfile, f"Saving {args.url} in the background — logs: {logfile}"
+        ):
+            return
+        asyncio.run(_run_add(args))
         return
     if args.command == "rebuild":
         _run_rebuild(args)
@@ -109,8 +140,15 @@ def main() -> None:
     # A normal interactive run detaches so the terminal comes straight back and a
     # browser tab pops up when the digest is ready. Cron / headless runs (--no-open)
     # and --foreground stay attached so their exit status and logs are visible.
-    if not args.foreground and not args.no_open and _detach_to_background(args):
-        return
+    if not args.foreground and not args.no_open:
+        logfile = paths().logs / f"newsfeed-{args.date.isoformat()}.log"
+        url = f"{server_base_url()}/digests/{args.date.isoformat()}.html"
+        message = (
+            f"Generating digest in the background — logs: {logfile}\n"
+            f"It will open at {url} when ready."
+        )
+        if _detach_to_background(logfile, message):
+            return
 
     asyncio.run(_generate_digest(args))
 
@@ -130,6 +168,54 @@ def _run_migration() -> None:
         conn.close()
     logger.info(f"Backfill written to {p.db} — {stats.summary()}")
     logger.info("Next: `newsfeed retag --all` to tag the backlog against your vocabulary.")
+
+
+async def _run_add(args: argparse.Namespace) -> None:
+    """Capture a URL as a Saved Article: archive, score, tag, summarize, star.
+
+    Reuses the whole newsletter pipeline — the only new step is fetching the URL
+    into an Email (ingest.fetch_url). The result is auto-starred so it lands on
+    the curated shelf and, via ADR 0003, is backed up to the cloud remote.
+    """
+    p = paths()
+    preferences = load_preferences(p.preferences)
+    backend = build_backend(load_llm_config(p.preferences))
+
+    logger.info(f"Fetching {args.url}")
+    try:
+        email = await ingest.fetch_url(args.url)
+    except ValueError as e:
+        logger.error(f"Could not save {args.url}: {e}")
+        sys.exit(1)
+    target_date = email.date.date()
+    email.archive_path = await asyncio.to_thread(archive_email, email, target_date, p.archive)
+
+    conn = library.connect(p.db)
+    try:
+        examples = select_examples_from_rows(library.calibration_rows(conn))
+        scored = (await score_emails([email], preferences, backend, examples))[0]
+        await summarize_articles([scored], "paragraph", backend)
+
+        library.upsert_scored(conn, scored, target_date)
+        if email.body:
+            library.set_body(conn, email.message_id, email.body)
+        library.set_star(conn, email.message_id, True)
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        _run_backup()
+    except Exception as e:
+        logger.warning(f"backup failed: {e}")
+
+    base = server_base_url()
+    tags = ", ".join(scored.tags) or "—"
+    print(f"Saved: {email.subject!r}")
+    print(f"  {email.sender_name} · score {scored.interest_score:.1f} · tags: {tags}")
+    if email.archive_path:
+        print(f"  archive: {base}{email.archive_path}")
+    print(f"  library: {base}/library?source=url")
 
 
 def _run_rebuild(args: argparse.Namespace) -> None:
@@ -178,23 +264,20 @@ async def _run_retag(args: argparse.Namespace) -> None:
         conn.close()
 
 
-def _detach_to_background(args: argparse.Namespace) -> bool:
+def _detach_to_background(logfile: Path, parent_message: str) -> bool:
     """Daemonise via double-fork; return True in the parent, False in the worker.
 
-    POSIX only. When fork isn't available the caller falls through to a normal
-    foreground run.
+    The worker's stdout/stderr are redirected to ``logfile``. The parent prints
+    ``parent_message`` and returns. POSIX only — when fork isn't available the
+    caller falls through to a normal foreground run.
     """
     if not hasattr(os, "fork"):
         return False
 
-    p = paths()
-    p.logs.mkdir(parents=True, exist_ok=True)
-    logfile = p.logs / f"newsfeed-{args.date.isoformat()}.log"
+    logfile.parent.mkdir(parents=True, exist_ok=True)
 
     if os.fork() > 0:
-        url = f"{server_base_url()}/digests/{args.date.isoformat()}.html"
-        print(f"Generating digest in the background — logs: {logfile}")
-        print(f"It will open at {url} when ready.")
+        print(parent_message)
         return True
 
     os.setsid()
@@ -258,6 +341,14 @@ async def _generate_digest(args: argparse.Namespace) -> None:
         )
         scored = await summarize_emails(scored, preferences, backend)
 
+        scoring_failures = sum(1 for s in scored if s.scoring_failed)
+        if scoring_failures:
+            logger.error(
+                f"⚠️  SCORING ALERT: {scoring_failures}/{len(scored)} article(s) could not be "
+                f"scored and fell back to {DEFAULT_LOW_SCORE}. Ranking for this digest is "
+                f"unreliable — check the log above for the malformed response."
+            )
+
         # articles.db is now the source of truth: upsert each result (preserving any
         # existing star/read/feedback/tag corrections) and index its body for search.
         for s in scored:
@@ -268,7 +359,7 @@ async def _generate_digest(args: argparse.Namespace) -> None:
     finally:
         conn.close()
 
-    output_path = render_digest(scored, target_date, p.digests)
+    output_path = render_digest(scored, target_date, p.digests, scoring_failures=scoring_failures)
     render_index(p.digests, p.serve)
     logger.info(f"Digest saved to {output_path}")
 

@@ -34,6 +34,20 @@ async def summarize_emails(
     return scored
 
 
+async def summarize_articles(
+    items: list[ScoredEmail], length: str, backend: LLMBackend
+) -> list[ScoredEmail]:
+    """Summarize ``items`` at a fixed length, ignoring tier.
+
+    ``summarize_emails`` only summarizes high/medium newsletters; a deliberately
+    saved article deserves a real summary regardless of its score, so ``newsfeed
+    add`` calls this with ``length='paragraph'``.
+    """
+    if items:
+        await _summarize_batch(items, length, backend)
+    return items
+
+
 async def _summarize_batch(items: list[ScoredEmail], length: str, backend: LLMBackend) -> None:
     instruction = (
         "a paragraph (3-5 sentences) capturing the key points and why it matters"

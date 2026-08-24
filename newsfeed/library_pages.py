@@ -39,6 +39,7 @@ _STYLE = """
            font-size: 0.76rem; font-weight: bold; color: white; margin-left: 4px; }
   .badge-high { background: #2a9; } .badge-medium { background: #c90; }
   .badge-low { background: #999; } .badge-lock { background: #b4553a; }
+  a.badge-src { background: #4a6a8a; color: white; } a.badge-src:hover { text-decoration: none; }
   .card-summary { color: #333; font-size: 0.95rem; }
   .chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
   .chip { font-size: 0.76rem; padding: 1px 8px; border: 1px solid #cbd; border-radius: 10px;
@@ -96,7 +97,8 @@ async function addTag(btn) {
 """
 
 _NAV = '<div class="nav"><a href="/">🏠 Home</a><a href="/library">📚 Library</a>' \
-       '<a href="/library?starred=1">★ Starred</a></div>'
+       '<a href="/library?starred=1">★ Starred</a>' \
+       '<a href="/library?source=url">📌 Saved</a></div>'
 
 _ITEM = """
     {%- macro tier_badge(a) -%}
@@ -110,6 +112,7 @@ _ITEM = """
         <a href="/library/author/{{ a.sender_name|urlencode }}">{{ a.sender_name }}</a>
         <span class="badge {{ tier_badge(a) }}">{{ "%.1f"|format(a.score) }}</span>
         {%- if a.paywalled %}<span class="badge badge-lock">🔒</span>{% endif %}
+        {%- if a.source == 'url' and a.url %}<a class="badge badge-src" href="{{ a.url }}" target="_blank" rel="noopener">🔗 web</a>{% endif %}
         {%- if a.date %} &nbsp;·&nbsp; {{ a.date }}{% endif %}
       </div>
       <div class="card-summary">{{ a.display_summary }}</div>
@@ -134,7 +137,9 @@ _PAGE = (
     "<title>{{ title }} — Library</title><style>" + _STYLE + "</style></head><body>"
     + _NAV +
     "<h1>{{ title }}</h1>{% if subtitle %}<p class=\"card-meta\">{{ subtitle }}</p>{% endif %}"
-    "{{ body }}"
+    # body is already-rendered, already-escaped card HTML; |safe stops a second
+    # autoescape pass from turning its tags into visible &lt;div&gt; text.
+    "{{ body|safe }}"
     "<script>" + _SCRIPT + "</script></body></html>"
 )
 

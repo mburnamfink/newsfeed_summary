@@ -114,23 +114,18 @@ Return only the JSON object, no other text."""
         f"Score these articles:\n{json.dumps(articles, ensure_ascii=False)}",
     )
 
-    try:
-        raw = raw_text.strip()
-        if raw.startswith("```"):
-            raw = raw.split("```", 2)[1]
-            if raw.startswith("json"):
-                raw = raw[4:]
-        result = json.loads(raw)
-        scores_by_idx = {s["message_id"]: s for s in result["scores"]}
-    except (json.JSONDecodeError, KeyError) as e:
-        logger.error(f"Failed to parse scoring response: {e}\nRaw: {raw_text[:500]}")
-        scores_by_idx = {}
+    scores_by_idx = {
+        s["message_id"]: s
+        for s in _parse_scores(raw_text)
+        if isinstance(s, dict) and "message_id" in s
+    }
 
     results = []
     for i, email in enumerate(emails):
         s = scores_by_idx.get(str(i), {})
         tags = validate_tags(s.get("tags"), preferences.tags)
         raw_score = s.get("interest_score")
+        failed = False
         try:
             interest = float(raw_score)
         except (TypeError, ValueError):
@@ -139,6 +134,7 @@ Return only the JSON object, no other text."""
                 f"from {email.sender_name}; defaulting to {DEFAULT_LOW_SCORE}"
             )
             interest = DEFAULT_LOW_SCORE
+            failed = True
         score = boost_for_interests(interest, tags, preferences.interests)
         results.append(
             ScoredEmail(
@@ -147,9 +143,94 @@ Return only the JSON object, no other text."""
                 topic=s.get("topic", "General"),
                 one_line=s.get("one_line", email.subject),
                 tags=tags,
+                scoring_failed=failed,
             )
         )
     return results
+
+
+def _strip_code_fence(text: str) -> str:
+    raw = text.strip()
+    if raw.startswith("```"):
+        raw = raw.split("```", 2)[1]
+        if raw.startswith("json"):
+            raw = raw[4:]
+    return raw.strip()
+
+
+def _parse_scores(raw_text: str) -> list[dict]:
+    """Parse the model's score list, salvaging what we can from malformed JSON.
+
+    A strict whole-response ``json.loads`` is fragile: a single unescaped quote or
+    control character in one article's ``topic``/``one_line`` raises
+    ``JSONDecodeError`` and would zero the scores for the entire batch. So on a
+    parse failure we log the text around the fault and fall back to recovering the
+    individual well-formed article objects, dropping only the broken one(s).
+    """
+    raw = _strip_code_fence(raw_text)
+    try:
+        result = json.loads(raw)
+        if isinstance(result, dict) and isinstance(result.get("scores"), list):
+            return result["scores"]
+        logger.error(f"Scoring response JSON missing a 'scores' list; salvaging. Raw: {raw[:500]}")
+    except json.JSONDecodeError as e:
+        window = raw[max(0, e.pos - 120) : e.pos + 120]
+        logger.error(
+            f"Scoring response is not valid JSON ({e}); salvaging individual "
+            f"articles. Near offset {e.pos}: …{window}…"
+        )
+
+    # Salvage: brace-match objects inside the scores array so one bad object
+    # doesn't discard its neighbours. Start past the array's opening bracket so
+    # the (malformed) outer object isn't matched as one giant blob.
+    marker = raw.find('"scores"')
+    bracket = raw.find("[", marker) if marker != -1 else raw.find("[")
+    region = raw[bracket + 1 :] if bracket != -1 else raw
+    salvaged = _salvage_objects(region)
+    logger.warning(f"Salvaged {len(salvaged)} article score(s) from malformed scoring response")
+    return salvaged
+
+
+def _salvage_objects(text: str) -> list[dict]:
+    """Extract every top-level ``{...}`` object that parses as a JSON dict.
+
+    Scans with string- and escape-aware brace matching, so a broken object simply
+    fails ``json.loads`` and is skipped while the scanner re-syncs at the next
+    opening brace and recovers the remaining good objects.
+    """
+    objs: list[dict] = []
+    i, n = 0, len(text)
+    while i < n:
+        if text[i] != "{":
+            i += 1
+            continue
+        depth, in_str, esc, j = 0, False, False, i
+        while j < n:
+            c = text[j]
+            if in_str:
+                if esc:
+                    esc = False
+                elif c == "\\":
+                    esc = True
+                elif c == '"':
+                    in_str = False
+            elif c == '"':
+                in_str = True
+            elif c == "{":
+                depth += 1
+            elif c == "}":
+                depth -= 1
+                if depth == 0:
+                    break
+            j += 1
+        try:
+            obj = json.loads(text[i : j + 1])
+            if isinstance(obj, dict):
+                objs.append(obj)
+        except json.JSONDecodeError:
+            pass
+        i = j + 1
+    return objs
 
 
 def _format_preferences(prefs: Preferences) -> str:

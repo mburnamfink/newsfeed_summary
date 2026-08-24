@@ -99,3 +99,35 @@ async def test_score_batch_survives_bad_json():
     assert scored[0].interest_score == scorer.DEFAULT_LOW_SCORE
     assert scored[0].one_line == "Fallback"
     assert scored[0].tags == []
+    assert scored[0].scoring_failed is True
+
+
+async def test_score_batch_flags_only_the_failed_article():
+    payload = json.dumps({"scores": [
+        {"message_id": "0", "interest_score": 8.0, "topic": "AI", "one_line": "x", "tags": []},
+    ]})
+    prefs = Preferences(gmail_labels=[], interests=[], thresholds={"high": 7, "medium": 4}, tags=VOCAB)
+    scored = await scorer.score_emails([_email("m0"), _email("m1")], prefs, FakeBackend(payload))
+    assert scored[0].scoring_failed is False        # real score
+    assert scored[0].interest_score == 8.0
+    assert scored[1].scoring_failed is True          # no entry -> fallback
+    assert scored[1].interest_score == scorer.DEFAULT_LOW_SCORE
+
+
+async def test_salvage_recovers_good_articles_around_a_broken_one():
+    # Middle object has an unescaped quote in one_line, closing the string early
+    # and making the whole document invalid JSON. The two clean objects survive.
+    payload = (
+        '{"scores": [\n'
+        '  {"message_id": "0", "interest_score": 6.0, "topic": "A", "one_line": "fine", "tags": []},\n'
+        '  {"message_id": "1", "interest_score": 9.0, "topic": "B", "one_line": "he said "hi" ok", "tags": []},\n'
+        '  {"message_id": "2", "interest_score": 4.0, "topic": "C", "one_line": "also fine", "tags": []}\n'
+        ']}'
+    )
+    prefs = Preferences(gmail_labels=[], interests=[], thresholds={"high": 7, "medium": 4}, tags=VOCAB)
+    emails = [_email("m0"), _email("m1", subject="Broken"), _email("m2")]
+    scored = await scorer.score_emails(emails, prefs, FakeBackend(payload))
+    assert scored[0].interest_score == 6.0 and scored[0].scoring_failed is False
+    assert scored[1].scoring_failed is True                       # the broken one
+    assert scored[1].interest_score == scorer.DEFAULT_LOW_SCORE
+    assert scored[2].interest_score == 4.0 and scored[2].scoring_failed is False

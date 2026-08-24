@@ -115,11 +115,41 @@ newsfeed --date 2026-05-13  # a specific day
 newsfeed --foreground       # stay attached to the terminal (see progress live)
 newsfeed --no-open          # don't launch a browser; implies --foreground (cron / headless)
 
+newsfeed add <url>          # save an article from a URL into the Library (see below)
 newsfeed migrate            # one-time: backfill articles.db from existing digests/archives
 newsfeed retag --all        # (re)tag stored articles against your tags: vocabulary
 newsfeed retag --since 2026-06-01
 newsfeed retag --tag technology
 ```
+
+### Saving a URL
+
+Save an article you read elsewhere into the Library — a stable offline copy that's scored,
+tagged, summarised, full-text indexed and starred, just like a newsletter:
+
+```bash
+newsfeed add https://example.com/some-article
+```
+
+It fetches the page, extracts the main content, archives it self-contained (images inlined),
+and upserts it into `articles.db` with `source=url`. Re-running `add` on the same URL updates
+that entry in place rather than duplicating it. Saved articles are auto-**starred** (so they
+also back up to Drive, ADR 0003) and browsable at
+[`/library?source=url`](http://localhost:8080/library?source=url).
+
+Like the daily digest, `add` **detaches to the background** so your terminal returns immediately;
+fetch/render/scoring progress goes to `logs/newsfeed-add-<timestamp>.log`. Pass `--foreground` to
+stay attached and watch it run (also the fallback where `fork` isn't available).
+
+Most blogs and news sites work over a plain fetch. For JavaScript-rendered or soft-paywalled
+pages, install the optional headless-browser fallback once:
+
+```bash
+uv pip install playwright        # or: pip install '.[browser]'
+playwright install chromium
+```
+
+Without it, `add` still captures static pages and warns when a page needs a browser.
 
 By default `newsfeed` **detaches to the background** so your terminal returns immediately, logs
 to `logs/newsfeed-<date>.log`, and opens the finished digest in a browser. It opens the digest

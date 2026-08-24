@@ -11,6 +11,8 @@ class Email:
     date: datetime
     body: str
     url: str = ""
+    # Ingestion origin: 'gmail' for fetched newsletters, 'url' for saved articles.
+    source: str = "gmail"
     # Full newsletter HTML, kept only long enough to build the Archive.
     raw_html: str = ""
     # Server-root-relative URL of the built Archive (e.g. /archive/2026-06-01/<id>/index.html).
@@ -28,6 +30,10 @@ class ScoredEmail:
     summary: str = ""
     # Controlled-vocabulary tags the scorer assigned (subset of Preferences.tags).
     tags: list[str] = field(default_factory=list)
+    # True when no real model score could be obtained (JSON parse failure or a
+    # null/unusable interest_score) and the article fell back to DEFAULT_LOW_SCORE.
+    # Transient run signal for alerting; not persisted to the library.
+    scoring_failed: bool = False
 
     @property
     def tier(self) -> str:

@@ -117,3 +117,48 @@ code, stale `serve/`, and the secret), then remove — never as an unattended st
   restore `state/` + re-auth, not a single-folder restore.
 - `rclone` becomes an operational dependency of the daily run (soft — its absence
   degrades to a logged warning, not a failure).
+
+## Addendum (2026-08-22) — durability hardening
+
+The original design made the remote a single mirrored copy of `articles.db`,
+refreshed by an unconditional `copyto`. That is a single point of failure: because
+the local DB is the source of truth and the remote is its only off-machine copy, a
+corrupt, truncated, or empty local DB (most easily from a run in the wrong
+directory, which `library.connect` silently creates as a fresh empty DB) would be
+pushed straight over the good remote copy — losing months of stars/ratings that
+cannot be regenerated. Google Drive's own file-version history is not a dependable
+backstop (binary versions are pruned, and restore is manual). The following
+protections were added to `newsfeed/backup.py`:
+
+- **Require `$NEWSFEED_HOME`.** `project_root()` no longer falls back to the current
+  working directory; it raises if the variable is unset. A stray-directory run can
+  no longer fabricate an empty DB. The interactive shell / launcher must export it
+  (e.g. `export NEWSFEED_HOME=/home/michael/dev/newsfeed_summary`).
+- **Consistent snapshot.** The DB is copied with `VACUUM INTO` to a temp file — a
+  transactionally-consistent snapshot even while the archive server holds the live
+  DB open — and only that snapshot is uploaded, never the live file.
+- **Sanity gate before overwrite.** The snapshot must pass `PRAGMA integrity_check`,
+  have a non-zero `articles` count, and not have collapsed >20% versus the last good
+  backup's count (recorded locally in `.backup_state.json`). Otherwise the remote DB
+  and its history are left untouched; `feedback.yaml`/`preferences.yaml` (skipped if
+  empty) and starred archives still sync. `NEWSFEED_BACKUP_FORCE=1` overrides the
+  drop check after an intentional bulk delete.
+- **Versioned history.** The validated snapshot is also written to
+  `state/history/articles-YYYY-MM-DD.db` (last 14 retained) and a permanent
+  `state/history/monthly/articles-YYYY-MM.db` (one per month, never pruned). Even a
+  bad DB that passes the gate leaves untouched prior copies to restore from.
+- **Staleness signal.** Each run records the last successful backup's timestamp and
+  count in `.backup_state.json`. Because a digest run detaches to a background
+  logfile before the backup step, the staleness check (`backup.staleness_message`)
+  runs in the CLI parent process, before the detach, and prints to the terminal —
+  so an expired rclone token that silently fails every run surfaces to the user
+  within `STALE_AFTER_DAYS` (3) rather than only in an unread log.
+
+Resulting `state/` layout:
+
+```
+gdrive:newsfeed_summary/state/
+  articles.db, feedback.yaml, preferences.yaml     (latest mirror)
+  history/articles-YYYY-MM-DD.db                    (last 14 daily snapshots)
+  history/monthly/articles-YYYY-MM.db               (permanent, one per month)
+```

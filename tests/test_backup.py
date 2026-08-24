@@ -1,3 +1,5 @@
+import json
+
 import pytest
 
 from newsfeed import backup, library
@@ -132,3 +134,113 @@ def test_run_backup_skips_when_rclone_missing(tmp_path, conn, calls, monkeypatch
     monkeypatch.setattr(backup, "_rclone_available", lambda: False)
     backup.run_backup(conn, Paths(tmp_path), CFG)
     assert calls == []
+
+
+# --- DB snapshot + sanity gate ----------------------------------------------
+
+
+def _db_conn(tmp_path, n_articles):
+    """A real on-disk DB (VACUUM INTO needs a file, not :memory:) with N articles."""
+    conn = library.connect(tmp_path / "articles.db")
+    for i in range(n_articles):
+        library.upsert_article(conn, message_id=f"a{i}", date="2026-05-10", sender_name="X")
+    conn.commit()
+    return conn
+
+
+def test_snapshot_validates_and_reports_count(tmp_path):
+    conn = _db_conn(tmp_path, 3)
+    result = backup._snapshot_and_validate(conn, Paths(tmp_path))
+    conn.close()
+    assert result is not None
+    snap_path, count = result
+    assert count == 3
+    backup._cleanup(snap_path)
+
+
+def test_snapshot_refuses_empty_db(tmp_path):
+    conn = _db_conn(tmp_path, 0)
+    assert backup._snapshot_and_validate(conn, Paths(tmp_path)) is None
+    conn.close()
+
+
+def test_snapshot_refuses_big_drop_vs_last_backup(tmp_path):
+    paths = Paths(tmp_path)
+    backup._write_backup_state(paths, 100)
+    conn = _db_conn(tmp_path, 5)  # 5 << 80% of 100
+    assert backup._snapshot_and_validate(conn, paths) is None
+    conn.close()
+
+
+def test_force_overrides_drop_refusal(tmp_path, monkeypatch):
+    paths = Paths(tmp_path)
+    backup._write_backup_state(paths, 100)
+    monkeypatch.setenv("NEWSFEED_BACKUP_FORCE", "1")
+    conn = _db_conn(tmp_path, 5)
+    assert backup._snapshot_and_validate(conn, paths) is not None
+    conn.close()
+
+
+def test_run_backup_uploads_snapshot_and_history_and_records_state(tmp_path, calls):
+    paths = Paths(tmp_path)
+    conn = _db_conn(tmp_path, 4)
+    try:
+        backup.run_backup(conn, paths, CFG)
+    finally:
+        conn.close()
+
+    dests = [args[2] for args in calls if args[0] == "copyto"]
+    assert "gdrive:newsfeed_summary/state/articles.db" in dests
+    assert any("/state/history/articles-" in d and d.endswith(".db") for d in dests)
+    assert any("/state/history/monthly/articles-" in d for d in dests)
+    assert backup._read_backup_state(paths)["last_count"] == 4
+
+
+def test_run_backup_refused_db_still_syncs_yaml_but_not_db(tmp_path, calls):
+    paths = Paths(tmp_path)
+    paths.feedback.write_text("fb", encoding="utf-8")
+    backup._write_backup_state(paths, 100)
+    conn = _db_conn(tmp_path, 2)  # collapse -> refused
+    try:
+        backup.run_backup(conn, paths, CFG)
+    finally:
+        conn.close()
+
+    dests = [args[2] for args in calls if args[0] == "copyto"]
+    assert "gdrive:newsfeed_summary/state/feedback.yaml" in dests
+    assert not any("articles.db" in d for d in dests)
+    # last-good count is preserved, not overwritten by the refused run
+    assert backup._read_backup_state(paths)["last_count"] == 100
+
+
+def test_staleness_message_none_when_no_state(tmp_path):
+    assert backup.staleness_message(Paths(tmp_path)) is None
+
+
+def test_staleness_message_none_when_fresh(tmp_path):
+    backup._write_backup_state(Paths(tmp_path), 10)  # records now()
+    assert backup.staleness_message(Paths(tmp_path)) is None
+
+
+def test_staleness_message_warns_when_stale(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    old = (datetime.now(timezone.utc) - timedelta(days=backup.STALE_AFTER_DAYS + 2)).isoformat()
+    (tmp_path / ".backup_state.json").write_text(
+        json.dumps({"last_success": old, "last_count": 10}), encoding="utf-8"
+    )
+    msg = backup.staleness_message(Paths(tmp_path))
+    assert msg is not None
+    assert "day(s) ago" in msg
+
+
+def test_prune_daily_history_keeps_newest(tmp_path, monkeypatch):
+    names = [f"articles-2026-05-{d:02d}.db" for d in range(1, 20)]  # 19 dailies
+    monkeypatch.setattr(backup, "_rclone_lines", lambda args: names)
+    deleted = []
+    monkeypatch.setattr(backup, "_run_rclone", lambda args: deleted.append(args) or True)
+
+    backup._prune_daily_history("gdrive:newsfeed_summary/state/history")
+
+    assert len(deleted) == 19 - backup.DAILY_HISTORY_KEEP
+    assert deleted[0][1].endswith("articles-2026-05-01.db")
+    assert not any("2026-05-19" in a[1] for a in deleted)

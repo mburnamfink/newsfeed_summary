@@ -38,7 +38,9 @@ CREATE TABLE IF NOT EXISTS articles (
     paywalled    INTEGER DEFAULT 0,
     starred      INTEGER DEFAULT 0,
     read         INTEGER DEFAULT 0,
-    feedback     TEXT
+    feedback     TEXT,
+    url          TEXT DEFAULT '',
+    source       TEXT DEFAULT 'gmail'
 );
 
 CREATE INDEX IF NOT EXISTS idx_articles_sender ON articles(sender_name);
@@ -103,6 +105,8 @@ class Article:
     starred: bool
     read: bool
     feedback: str | None
+    url: str = ""
+    source: str = "gmail"
     tags: list[str] = field(default_factory=list)
 
     @property
@@ -120,14 +124,31 @@ class Article:
         return "low"
 
 
+# Columns added to `articles` after the original schema shipped. CREATE TABLE
+# IF NOT EXISTS leaves an existing table untouched, so these are applied on open.
+_ADDED_COLUMNS = {
+    "url": "TEXT DEFAULT ''",
+    "source": "TEXT DEFAULT 'gmail'",
+}
+
+
 def connect(db_path: Path | str) -> sqlite3.Connection:
     """Open ``articles.db`` (creating it and the schema if absent)."""
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     conn.executescript(_SCHEMA)
+    _ensure_columns(conn)
     conn.commit()
     return conn
+
+
+def _ensure_columns(conn: sqlite3.Connection) -> None:
+    """Idempotently add columns introduced after the first schema (ALTER-on-open)."""
+    existing = {r["name"] for r in conn.execute("PRAGMA table_info(articles)")}
+    for name, decl in _ADDED_COLUMNS.items():
+        if name not in existing:
+            conn.execute(f"ALTER TABLE articles ADD COLUMN {name} {decl}")
 
 
 # --- writes -----------------------------------------------------------------
@@ -147,6 +168,8 @@ def upsert_article(
     score: float | None = None,
     archive_path: str = "",
     paywalled: bool = False,
+    url: str = "",
+    source: str = "gmail",
 ) -> None:
     """Insert or update the article row, preserving reader-owned state.
 
@@ -159,8 +182,8 @@ def upsert_article(
         """
         INSERT INTO articles
             (message_id, date, sender_name, sender_email, subject, one_line,
-             summary, topic, score, archive_path, paywalled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             summary, topic, score, archive_path, paywalled, url, source)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(message_id) DO UPDATE SET
             date         = excluded.date,
             sender_name  = excluded.sender_name,
@@ -171,11 +194,13 @@ def upsert_article(
             topic        = excluded.topic,
             score        = excluded.score,
             archive_path = excluded.archive_path,
-            paywalled    = excluded.paywalled
+            paywalled    = excluded.paywalled,
+            url          = excluded.url,
+            source       = excluded.source
         """,
         (
             message_id, date, sender_name, sender_email, subject, one_line,
-            summary, topic, score, archive_path, int(paywalled),
+            summary, topic, score, archive_path, int(paywalled), url, source,
         ),
     )
 
@@ -196,6 +221,8 @@ def upsert_scored(conn: sqlite3.Connection, scored: ScoredEmail, target_date: da
         score=scored.interest_score,
         archive_path=e.archive_path,
         paywalled=e.paywalled,
+        url=e.url,
+        source=e.source,
     )
     set_llm_tags(conn, e.message_id, scored.tags)
 
@@ -319,6 +346,8 @@ def _rows_to_articles(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list
             starred=bool(r["starred"]),
             read=bool(r["read"]),
             feedback=r["feedback"],
+            url=r["url"] or "",
+            source=r["source"] or "gmail",
             tags=tags.get(r["message_id"], []),
         )
         for r in rows
@@ -369,6 +398,14 @@ def all_dates(conn: sqlite3.Connection) -> list[str]:
 def list_starred(conn: sqlite3.Connection) -> list[Article]:
     rows = conn.execute(
         f"{_SELECT} WHERE starred = 1 ORDER BY date DESC, score DESC"
+    ).fetchall()
+    return _rows_to_articles(conn, rows)
+
+
+def list_saved(conn: sqlite3.Connection) -> list[Article]:
+    """Articles ingested from a URL (``newsfeed add``), newest first."""
+    rows = conn.execute(
+        f"{_SELECT} WHERE source = 'url' ORDER BY date DESC, score DESC"
     ).fetchall()
     return _rows_to_articles(conn, rows)
 

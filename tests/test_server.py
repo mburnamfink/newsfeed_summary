@@ -88,6 +88,14 @@ def test_author_page(live_server):
     assert "Solarpunk" not in html
 
 
+def test_list_body_is_not_double_escaped(live_server):
+    """Card HTML must reach the browser as tags, not visible &lt;div&gt; text."""
+    base, _ = live_server
+    _, html = _get(base, "/library/author/Max%20Read")
+    assert '<div class="card' in html
+    assert "&lt;div" not in html
+
+
 def test_tag_page_uses_effective_tags(live_server):
     base, _ = live_server
     _, html = _get(base, "/library/tag/artificial-intelligence")

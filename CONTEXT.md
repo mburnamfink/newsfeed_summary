@@ -18,6 +18,9 @@ The daily HTML page rendered by the system. Lists all Scored Emails grouped by T
 ## Archive
 A self-contained, stored copy of a newsletter's raw HTML with all external images downloaded locally and HTML rewritten to reference them. Created at fetch time. Linked to from the Digest. Stored under `archive/YYYY-MM-DD/{message_id}/`.
 
+## Saved Article
+An article captured from a URL with `newsfeed add <url>`, rather than fetched from Gmail — a second ingestion door into the [[Library]]. It is fetched and cleaned to a stable offline copy (static HTTP + main-content extraction, with a headless-browser fallback for JS/paywalled pages), then flows through the *same* Archive → score → tag → summarize → upsert pipeline as a newsletter. Internally it is an [[Email]] with `source = "url"` (vs. `"gmail"`) and a URL-derived `message_id`; the shared `Email` shape is what lets it reuse the whole pipeline. Auto-[[Starred]] on capture, since a deliberate save signals both curation and durability (it then backs up to Drive per ADR 0003). See [ADR 0005](docs/adr/0005-url-article-capture.md).
+
 ## Preferences
 User-defined configuration (in `preferences.yaml`) controlling which Gmail labels to fetch, interest topics, and source/keyword boost and mute rules.
 

@@ -215,6 +215,69 @@ def test_display_summary_falls_back_to_one_line(conn):
     assert library.get_article(conn, "m1").display_summary == "just a line"
 
 
+def test_saved_articles_carry_url_and_source(conn):
+    _add(conn, "m1", url="https://example.com/x", source="url")
+    art = library.get_article(conn, "m1")
+    assert art.source == "url"
+    assert art.url == "https://example.com/x"
+
+
+def test_gmail_rows_default_source(conn):
+    _add(conn, "m1")
+    art = library.get_article(conn, "m1")
+    assert art.source == "gmail"
+    assert art.url == ""
+
+
+def test_list_saved_returns_only_url_rows(conn):
+    _add(conn, "gm", source="gmail")
+    _add(conn, "u1", date="2026-05-10", source="url", url="https://a.com")
+    _add(conn, "u2", date="2026-05-12", source="url", url="https://b.com")
+    ids = [a.message_id for a in library.list_saved(conn)]
+    assert ids == ["u2", "u1"]  # newest first, gmail row excluded
+
+
+def test_upsert_scored_persists_source_and_url(conn):
+    email = Email(
+        message_id="url-abc", sender_name="Jane Doe", sender_email="",
+        subject="Post", date=None, body="body",  # type: ignore[arg-type]
+        url="https://example.com/post", source="url",
+    )
+    scored = ScoredEmail(email=email, interest_score=6.0, topic="t", one_line="l", summary="s")
+    library.upsert_scored(conn, scored, date(2026, 5, 10))
+    art = library.get_article(conn, "url-abc")
+    assert art.source == "url"
+    assert art.url == "https://example.com/post"
+
+
+def test_connect_adds_columns_to_legacy_db(tmp_path):
+    """A DB created before url/source existed gains them on the next connect()."""
+    import sqlite3
+
+    db = tmp_path / "legacy.db"
+    legacy = sqlite3.connect(db)
+    # The original ADR-0002 articles schema, before url/source were added.
+    legacy.execute(
+        "CREATE TABLE articles (message_id TEXT PRIMARY KEY, date TEXT, "
+        "sender_name TEXT, sender_email TEXT, subject TEXT, one_line TEXT, "
+        "summary TEXT DEFAULT '', topic TEXT DEFAULT '', score REAL, "
+        "archive_path TEXT DEFAULT '', paywalled INTEGER DEFAULT 0, "
+        "starred INTEGER DEFAULT 0, read INTEGER DEFAULT 0, feedback TEXT)"
+    )
+    legacy.execute("INSERT INTO articles (message_id, date) VALUES ('m1', '2026-05-10')")
+    legacy.commit()
+    legacy.close()
+
+    conn = library.connect(db)
+    try:
+        cols = {r["name"] for r in conn.execute("PRAGMA table_info(articles)")}
+        assert {"url", "source"} <= cols
+        art = library.get_article(conn, "m1")
+        assert art.source == "gmail"  # column default backfills the old row
+    finally:
+        conn.close()
+
+
 def test_state_map_only_returns_nondefault_rows(conn):
     _add(conn, "plain")
     _add(conn, "starred")

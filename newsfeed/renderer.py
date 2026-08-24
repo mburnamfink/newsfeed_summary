@@ -45,6 +45,9 @@ _TEMPLATE = """\
     }
     h1 { font-size: 1.75rem; border-bottom: 2px solid #333; padding-bottom: 10px; margin-bottom: 4px; }
     .meta-line { color: #777; font-size: 0.9rem; margin-bottom: 36px; }
+    .alert-banner { background: #fdecea; border: 1px solid #f5c6cb; color: #8a1c1c;
+                    border-radius: 6px; padding: 12px 16px; margin: -20px 0 32px;
+                    font-size: 0.95rem; }
     h2 { font-size: 1.2rem; color: #333; margin-top: 40px; margin-bottom: 12px; }
     .count { color: #999; font-weight: normal; font-size: 0.95rem; }
     .empty { color: #aaa; font-style: italic; font-size: 0.9rem; }
@@ -144,6 +147,9 @@ _TEMPLATE = """\
   <div class="nav"><a href="/">🏠 Home</a><a href="/library">📚 Library</a><a href="/library?starred=1">★ Starred</a></div>
   <h1>Newsletter Digest</h1>
   <div class="meta-line">{{ date }} &nbsp;·&nbsp; {{ total }} articles{% if paywalled %} &nbsp;·&nbsp; 🔒 {{ paywalled }} paywalled{% endif %} &nbsp;·&nbsp; generated {{ generated_at }}</div>
+  {% if scoring_failures %}
+  <div class="alert-banner">⚠️ Scoring failed for {{ scoring_failures }} of {{ total }} article{{ 's' if scoring_failures != 1 else '' }}. Those defaulted to a low score, so today's ranking is unreliable.</div>
+  {% endif %}
 
   <h2>Must Read <span class="count">({{ high|length }})</span></h2>
   {% if high %}
@@ -290,6 +296,7 @@ def render_digest(
     target_date: date,
     output_dir: Path,
     generated_at: str | None = None,
+    scoring_failures: int = 0,
 ) -> Path:
     env = Environment(autoescape=True)
     template = env.from_string(_TEMPLATE)
@@ -303,6 +310,7 @@ def render_digest(
         total=len(scored),
         paywalled=sum(1 for s in scored if s.email.paywalled),
         generated_at=generated_at or datetime.now().strftime("%I:%M %p"),
+        scoring_failures=scoring_failures,
         high=high,
         medium=medium,
         low=low,

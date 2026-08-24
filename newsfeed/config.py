@@ -2,9 +2,10 @@
 
 The console scripts (``newsfeed``, ``newsfeed-server``) may be installed anywhere
 (``uv tool install``), so paths must not be derived from ``__file__`` — that would
-point inside the install location, not the user's data. Instead the project root
-is ``$NEWSFEED_HOME`` if set, else the current working directory. The systemd unit
-sets ``WorkingDirectory``; an interactive run is expected from the project dir.
+point inside the install location, not the user's data. The project root is taken
+from ``$NEWSFEED_HOME`` and nothing else: a cwd fallback let a run launched from
+the wrong directory create a fresh empty ``articles.db`` and then back it up over
+the real one (ADR 0003), so the variable is now required.
 """
 import os
 from dataclasses import dataclass
@@ -17,7 +18,14 @@ DEFAULT_SERVER_PORT = 8080
 
 def project_root() -> Path:
     env = os.environ.get("NEWSFEED_HOME")
-    return Path(env).expanduser().resolve() if env else Path.cwd()
+    if not env:
+        raise RuntimeError(
+            "NEWSFEED_HOME is not set. Point it at your data directory, e.g.\n"
+            "  export NEWSFEED_HOME=/home/michael/dev/newsfeed_summary\n"
+            "This is required so a run from the wrong directory can't create an empty "
+            "articles.db and back it up over your real data (ADR 0003)."
+        )
+    return Path(env).expanduser().resolve()
 
 
 @dataclass(frozen=True)

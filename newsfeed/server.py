@@ -9,6 +9,7 @@ service (see deploy/newsfeed-server.service).
 GET (HTML):
   /library                    landing: search box + tag/author facets
   /library?starred=1          the starred shelf
+  /library?source=url         articles saved from the web (newsfeed add)
   /library/author/<sender>    one author's articles, newest first
   /library/tag/<tag>          every article with that effective tag
   /library/search?q=<terms>   FTS keyword search over bodies
@@ -80,6 +81,11 @@ def serve(
                         html = library_pages.render_list(
                             "★ Starred", library.list_starred(conn),
                             "Articles you've starred to follow up on.",
+                        )
+                    elif query.get("source") == ["url"]:
+                        html = library_pages.render_list(
+                            "📌 Saved", library.list_saved(conn),
+                            "Articles you saved from the web with `newsfeed add`.",
                         )
                     else:
                         html = library_pages.render_home(
