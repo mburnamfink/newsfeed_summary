@@ -99,6 +99,20 @@ def backup_config() -> dict:
     return _preferences_block("backup")
 
 
+# On-demand long-form summaries (ADR 0007) want a strong model regardless of the
+# digest's cheaper default, so summaries get their own LLM config. Defaults to
+# Opus 4.8 on the subscription backend; override with a `summary:` block.
+DEFAULT_SUMMARY_BACKEND = "subscription"
+DEFAULT_SUMMARY_MODEL = "claude-opus-4-8"
+
+
+def summary_config() -> dict:
+    """LLM config for the long-form summarizer (see :mod:`newsfeed.deep_summary`)."""
+    cfg = {"backend": DEFAULT_SUMMARY_BACKEND, "model": DEFAULT_SUMMARY_MODEL}
+    cfg.update(_preferences_block("summary"))
+    return cfg
+
+
 def server_port() -> int:
     return int(_server_config().get("port", DEFAULT_SERVER_PORT))
 

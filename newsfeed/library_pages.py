@@ -46,9 +46,11 @@ _STYLE = """
           background: #eef2ff; color: #335; cursor: pointer; }
   .chip:hover { background: #dde6ff; }
   .item-actions { margin-top: 8px; display: flex; align-items: center; gap: 6px; }
-  .react, .star { padding: 3px 10px; font-size: 0.85rem; cursor: pointer;
+  .react, .star, .summary { padding: 3px 10px; font-size: 0.85rem; cursor: pointer;
           border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; color: #555; }
-  .react:hover, .star:hover { background: #ececec; }
+  .react:hover, .star:hover, .summary:hover { background: #ececec; }
+  .summary.has-summary { background: #eef4f0; border-color: #bcd6c8; color: #2a5b45; font-weight: bold; }
+  .summary:disabled { opacity: 0.7; cursor: default; }
   .react.active { color: white; border-color: transparent; font-weight: bold; }
   .react-down.active { background: #c0563d; } .react-confirm.active { background: #3b7dd8; }
   .react-up.active { background: #2a9d5c; }
@@ -94,6 +96,19 @@ async function addTag(btn) {
   if (!await post('/api/tag', {message_id:item.dataset.msgid, tag, op:'add'})) return;
   location.reload();
 }
+async function summarize(btn) {
+  const item = btn.closest('[data-msgid]'); if (!item) return;
+  const id = item.dataset.msgid;
+  if (btn.classList.contains('has-summary')) {
+    window.open('/reader/summary/' + encodeURIComponent(id), '_blank', 'noopener'); return;
+  }
+  btn.disabled = true; btn.textContent = '⏳ Summarizing…';
+  const ok = await post('/api/summarize', {message_id:id});
+  btn.disabled = false;
+  if (!ok) { btn.textContent = '⚠️ Retry'; return; }
+  // Second tap opens it — keeps window.open inside a user gesture (no popup block).
+  btn.classList.add('has-summary'); btn.textContent = '📄 Summary';
+}
 """
 
 _NAV = '<div class="nav"><a href="/">🏠 Home</a><a href="/library">📚 Library</a>' \
@@ -104,7 +119,7 @@ _ITEM = """
     {%- macro tier_badge(a) -%}
       {%- if a.tier == 'high' %}badge-high{% elif a.tier == 'medium' %}badge-medium{% else %}badge-low{% endif -%}
     {%- endmacro -%}
-    <div class="card {{ 'is-read' if a.read }}" data-msgid="{{ a.message_id }}"
+    <div class="card {{ 'is-read' if a.read or a.dismissed }}" data-msgid="{{ a.message_id }}"
          data-subject="{{ a.subject }}" data-sender="{{ a.sender_name }}">
       <h3><a href="{{ a.archive_path or ('https://mail.google.com/mail/u/0/#all/' ~ a.message_id) }}"
              target="_blank" rel="noopener">{{ a.subject }}</a></h3>
@@ -114,6 +129,7 @@ _ITEM = """
         {%- if a.paywalled %}<span class="badge badge-lock">🔒</span>{% endif %}
         {%- if a.source == 'url' and a.url %}<a class="badge badge-src" href="{{ a.url }}" target="_blank" rel="noopener">🔗 web</a>{% endif %}
         {%- if a.date %} &nbsp;·&nbsp; {{ a.date }}{% endif %}
+        {%- if a.reading_minutes %} &nbsp;·&nbsp; {{ a.reading_minutes }} min read{% endif %}
       </div>
       <div class="card-summary">{{ a.display_summary }}</div>
       <div class="chips">
@@ -123,6 +139,7 @@ _ITEM = """
         <span class="chip" onclick="addTag(this)" title="Add a tag">+</span>
       </div>
       <div class="item-actions">
+        <button class="summary {{ 'has-summary' if a.has_summary }}" onclick="summarize(this)" title="Long-form summary">📄 {{ 'Summary' if a.has_summary else 'Summarize' }}</button>
         <button class="star {{ 'active' if a.starred }}" onclick="toggleStar(this)" title="Star to follow up">★</button>
         <button class="react react-down {{ 'active' if a.feedback == 'down' }}" data-sentiment="down" onclick="rate(this)" title="Rank lower">👎</button>
         <button class="react react-confirm {{ 'active' if a.feedback == 'confirmed' }}" data-sentiment="confirmed" onclick="rate(this)" title="Read &amp; right">✓</button>

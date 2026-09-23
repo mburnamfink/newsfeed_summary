@@ -16,6 +16,7 @@ dependencies = [
     "jinja2>=3.1.0",
     "python-dateutil>=2.8.0",
     "trafilatura>=1.8.0",
+    "markdown>=3.4",
 ]
 
 # Optional: headless-browser fallback for JS-rendered / paywalled pages in

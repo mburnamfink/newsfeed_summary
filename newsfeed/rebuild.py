@@ -22,14 +22,16 @@ logger = logging.getLogger(__name__)
 _GENERATED_RE = re.compile(r"generated\s+(\d{1,2}:\d{2}\s*[AP]M)", re.IGNORECASE)
 
 
-def _to_scored(a: Article) -> ScoredEmail:
+def _to_scored(conn: sqlite3.Connection, a: Article) -> ScoredEmail:
     email = Email(
         message_id=a.message_id,
         sender_name=a.sender_name,
         sender_email=a.sender_email,
         subject=a.subject,
         date=datetime.fromisoformat(a.date) if a.date else datetime.min,
-        body="",
+        # Restore the indexed body so reading-time (a body-derived property) is
+        # recomputed for rebuilt digests just as it is for freshly-generated ones.
+        body=library.get_body(conn, a.message_id),
         archive_path=a.archive_path,
         paywalled=a.paywalled,
     )
@@ -58,7 +60,7 @@ def rebuild_date(conn: sqlite3.Connection, day: str, digests_dir: Path) -> int:
         return 0
     generated_at = _original_generated_at(digests_dir / f"{day}.html")
     render_digest(
-        [_to_scored(a) for a in articles],
+        [_to_scored(conn, a) for a in articles],
         date.fromisoformat(day),
         digests_dir,
         generated_at=generated_at,

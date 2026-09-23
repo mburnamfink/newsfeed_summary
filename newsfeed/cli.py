@@ -9,7 +9,7 @@ from pathlib import Path
 
 import yaml
 
-from . import backup, ingest, library, migrate, rebuild, tagger
+from . import backup, deep_summary, ingest, library, migrate, rebuild, tagger
 from .archiver import archive_email
 from .config import paths, server_base_url
 from .feedback import select_examples_from_rows
@@ -84,6 +84,16 @@ def main() -> None:
         help="Run attached to the terminal instead of detaching to the background",
     )
 
+    sum_p = sub.add_parser(
+        "summarize", help="Write a long-form (1000-2000 word) summary of an article or URL"
+    )
+    sum_p.add_argument("target", help="An article URL, or a stored message_id")
+    sum_p.add_argument(
+        "--foreground",
+        action="store_true",
+        help="Run attached to the terminal instead of detaching to the background",
+    )
+
     rebuild_p = sub.add_parser(
         "rebuild", help="Re-render stored digests into the current format (no fetch/re-score)"
     )
@@ -126,6 +136,14 @@ def main() -> None:
         ):
             return
         asyncio.run(_run_add(args))
+        return
+    if args.command == "summarize":
+        logfile = paths().logs / f"newsfeed-summarize-{datetime.now():%Y%m%d-%H%M%S}.log"
+        if not args.foreground and _detach_to_background(
+            logfile, f"Summarizing {args.target} in the background — logs: {logfile}"
+        ):
+            return
+        asyncio.run(_run_summarize(args))
         return
     if args.command == "rebuild":
         _run_rebuild(args)
@@ -182,25 +200,12 @@ async def _run_add(args: argparse.Namespace) -> None:
     backend = build_backend(load_llm_config(p.preferences))
 
     logger.info(f"Fetching {args.url}")
+    conn = library.connect(p.db)
     try:
-        email = await ingest.fetch_url(args.url)
+        scored = await _capture_url(args.url, p, preferences, backend, conn)
     except ValueError as e:
         logger.error(f"Could not save {args.url}: {e}")
         sys.exit(1)
-    target_date = email.date.date()
-    email.archive_path = await asyncio.to_thread(archive_email, email, target_date, p.archive)
-
-    conn = library.connect(p.db)
-    try:
-        examples = select_examples_from_rows(library.calibration_rows(conn))
-        scored = (await score_emails([email], preferences, backend, examples))[0]
-        await summarize_articles([scored], "paragraph", backend)
-
-        library.upsert_scored(conn, scored, target_date)
-        if email.body:
-            library.set_body(conn, email.message_id, email.body)
-        library.set_star(conn, email.message_id, True)
-        conn.commit()
     finally:
         conn.close()
 
@@ -211,11 +216,88 @@ async def _run_add(args: argparse.Namespace) -> None:
 
     base = server_base_url()
     tags = ", ".join(scored.tags) or "—"
-    print(f"Saved: {email.subject!r}")
-    print(f"  {email.sender_name} · score {scored.interest_score:.1f} · tags: {tags}")
-    if email.archive_path:
-        print(f"  archive: {base}{email.archive_path}")
+    print(f"Saved: {scored.email.subject!r}")
+    print(f"  {scored.email.sender_name} · score {scored.interest_score:.1f} · tags: {tags}")
+    if scored.email.archive_path:
+        print(f"  archive: {base}{scored.email.archive_path}")
     print(f"  library: {base}/library?source=url")
+
+
+async def _capture_url(url, p, preferences, backend, conn):
+    """Fetch, archive, score, tag, short-summarize and star a URL. Returns the ScoredEmail.
+
+    Shared by ``add`` and ``summarize`` so a URL flows through the identical
+    newsletter pipeline before it lands in ``articles.db`` (starred, backed up).
+    """
+    email = await ingest.fetch_url(url)
+    target_date = email.date.date()
+    email.archive_path = await asyncio.to_thread(archive_email, email, target_date, p.archive)
+
+    examples = select_examples_from_rows(library.calibration_rows(conn))
+    scored = (await score_emails([email], preferences, backend, examples))[0]
+    await summarize_articles([scored], "paragraph", backend)
+
+    library.upsert_scored(conn, scored, target_date)
+    if email.body:
+        library.set_body(conn, email.message_id, email.body)
+    library.set_star(conn, email.message_id, True)
+    conn.commit()
+    return scored
+
+
+async def _run_summarize(args: argparse.Namespace) -> None:
+    """Write a long-form summary of a stored article or a URL (ADR 0007).
+
+    A URL not yet in the Library is captured through the same pipeline as ``add``
+    (scored, tagged, starred) first, so the summary attaches to a real row. The
+    summary itself always uses the summary backend (Opus 4.8), independent of the
+    digest's cheaper scoring backend.
+    """
+    p = paths()
+    conn = library.connect(p.db)
+    try:
+        target: str = args.target
+        if target.startswith(("http://", "https://")):
+            message_id = ingest.url_message_id(ingest.normalize_url(target))
+            if library.get_article(conn, message_id) is None:
+                logger.info(f"Fetching {target}")
+                preferences = load_preferences(p.preferences)
+                scoring_backend = build_backend(load_llm_config(p.preferences))
+                try:
+                    scored = await _capture_url(target, p, preferences, scoring_backend, conn)
+                except ValueError as e:
+                    logger.error(f"Could not fetch {target}: {e}")
+                    sys.exit(1)
+                message_id = scored.email.message_id
+        else:
+            message_id = target
+            if library.get_article(conn, message_id) is None:
+                logger.error(f"No article with message_id {message_id!r} in the Library.")
+                sys.exit(1)
+
+        logger.info("Writing long-form summary…")
+        try:
+            result = await deep_summary.summarize_message(conn, message_id)
+        except (ValueError, KeyError) as e:
+            logger.error(f"Could not summarize: {e}")
+            sys.exit(1)
+        library.set_summary(
+            conn, message_id, result.summary_md,
+            model=result.model, source=result.source, word_count=result.word_count,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    try:
+        _run_backup()
+    except Exception as e:
+        logger.warning(f"backup failed: {e}")
+
+    base = server_base_url()
+    src = "full article" if result.source == "url" else "stored text"
+    print(f"Summary written — {result.word_count} words · {result.model} · from {src}")
+    print(f"  read: {base}/reader/summary/{message_id}")
 
 
 def _run_rebuild(args: argparse.Namespace) -> None:

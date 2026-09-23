@@ -46,15 +46,15 @@ class LLMBackend:
     def __init__(self, max_concurrency: int):
         self._semaphore = asyncio.Semaphore(max_concurrency)
 
-    async def acomplete(self, system_text: str, prompt: str) -> str:
+    async def acomplete(self, system_text: str, prompt: str, **opts) -> str:
         async with self._semaphore:
-            return await self._acomplete(system_text, prompt)
+            return await self._acomplete(system_text, prompt, **opts)
 
-    async def _acomplete(self, system_text: str, prompt: str) -> str:
+    async def _acomplete(self, system_text: str, prompt: str, **opts) -> str:
         raise NotImplementedError
 
-    def complete(self, system_text: str, prompt: str) -> str:
-        return asyncio.run(self.acomplete(system_text, prompt))
+    def complete(self, system_text: str, prompt: str, **opts) -> str:
+        return asyncio.run(self.acomplete(system_text, prompt, **opts))
 
 
 class AnthropicBackend(LLMBackend):
@@ -70,14 +70,22 @@ class AnthropicBackend(LLMBackend):
         self.model = model
         self.client = AsyncAnthropic()
 
-    async def _acomplete(self, system_text: str, prompt: str) -> str:
+    async def _acomplete(self, system_text: str, prompt: str, **opts) -> str:
+        # opts (optional): max_tokens, thinking (adaptive on Opus 4.8), effort.
+        extra: dict = {}
+        if opts.get("thinking") is not None:
+            extra["thinking"] = opts["thinking"]
+        if opts.get("effort") is not None:
+            extra["output_config"] = {"effort": opts["effort"]}
         response = await self.client.messages.create(
             model=self.model,
-            max_tokens=MAX_TOKENS,
+            max_tokens=opts.get("max_tokens") or MAX_TOKENS,
             system=[{"type": "text", "text": system_text, "cache_control": {"type": "ephemeral"}}],
             messages=[{"role": "user", "content": prompt}],
+            **extra,
         )
-        return response.content[0].text
+        # With thinking on, content[0] is a thinking block — join the text blocks.
+        return "".join(b.text for b in response.content if b.type == "text")
 
 
 class SubscriptionBackend(LLMBackend):
@@ -94,7 +102,9 @@ class SubscriptionBackend(LLMBackend):
         self.model = model
         os.environ.pop("ANTHROPIC_API_KEY", None)
 
-    async def _acomplete(self, system_text: str, prompt: str) -> str:
+    async def _acomplete(self, system_text: str, prompt: str, **_opts) -> str:
+        # Output length and thinking are governed by Claude Code / the prompt here,
+        # so the API-only tuning opts (max_tokens/thinking/effort) are ignored.
         from claude_agent_sdk import (
             AssistantMessage,
             ClaudeAgentOptions,

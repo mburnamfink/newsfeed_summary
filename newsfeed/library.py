@@ -18,7 +18,9 @@ own lock; SQLite's own locking guards the CLI/pipeline path.
 """
 import sqlite3
 from dataclasses import dataclass, field
-from datetime import date
+
+from .reading import reading_minutes as _reading_minutes
+from datetime import date, datetime, timezone
 from pathlib import Path
 
 from .models import ScoredEmail
@@ -80,6 +82,20 @@ CREATE VIRTUAL TABLE IF NOT EXISTS articles_fts USING fts5(
     body,
     message_id UNINDEXED
 );
+
+-- On-demand long-form summaries (ADR 0007). One per article, keyed by message_id;
+-- deliberately its own table so a digest re-run's upsert (which overwrites the
+-- pipeline-derived articles columns) can never clobber a summary. source records
+-- whether the summary was written from the stored body or from full text
+-- re-fetched via the article's URL (the teaser case).
+CREATE TABLE IF NOT EXISTS article_summaries (
+    message_id TEXT PRIMARY KEY,
+    summary_md TEXT NOT NULL,
+    model      TEXT NOT NULL,
+    source     TEXT NOT NULL,
+    word_count INTEGER,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -108,6 +124,12 @@ class Article:
     url: str = ""
     source: str = "gmail"
     tags: list[str] = field(default_factory=list)
+    # Whether a long-form summary (ADR 0007) exists for this article. Populated on
+    # read so every card can show the right Summarize/Read-summary control.
+    has_summary: bool = False
+    # Word-count-based reading estimate of the stored body, 0 when no body is held.
+    reading_minutes: int = 0
+    dismissed: bool = False
 
     @property
     def display_summary(self) -> str:
@@ -129,6 +151,8 @@ class Article:
 _ADDED_COLUMNS = {
     "url": "TEXT DEFAULT ''",
     "source": "TEXT DEFAULT 'gmail'",
+    # Reader "Ignore" (ADR 0008): out of the queue without being read or rated.
+    "dismissed": "INTEGER DEFAULT 0",
 }
 
 
@@ -173,7 +197,7 @@ def upsert_article(
 ) -> None:
     """Insert or update the article row, preserving reader-owned state.
 
-    ``starred``, ``read``, ``feedback`` and the ``article_tag_delta`` overlay are
+    ``starred``, ``read``, ``feedback``, ``dismissed`` and the ``article_tag_delta`` overlay are
     never overwritten here — only the pipeline-derived fields are. Re-running a
     day's digest therefore refreshes scores/summaries without clobbering the
     reader's stars, reactions and tag fixes.
@@ -245,6 +269,53 @@ def set_body(conn: sqlite3.Connection, message_id: str, body: str) -> None:
     )
 
 
+def set_summary(
+    conn: sqlite3.Connection,
+    message_id: str,
+    summary_md: str,
+    *,
+    model: str,
+    source: str,
+    word_count: int,
+) -> None:
+    """Store (or replace) the long-form summary for an article (ADR 0007)."""
+    conn.execute(
+        """
+        INSERT INTO article_summaries
+            (message_id, summary_md, model, source, word_count, created_at)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(message_id) DO UPDATE SET
+            summary_md = excluded.summary_md,
+            model      = excluded.model,
+            source     = excluded.source,
+            word_count = excluded.word_count,
+            created_at = excluded.created_at
+        """,
+        (
+            message_id, summary_md, model, source, word_count,
+            datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        ),
+    )
+
+
+def get_summary(conn: sqlite3.Connection, message_id: str) -> dict | None:
+    """The stored long-form summary and its provenance, or None."""
+    row = conn.execute(
+        "SELECT summary_md, model, source, word_count, created_at "
+        "FROM article_summaries WHERE message_id = ?",
+        (message_id,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_body(conn: sqlite3.Connection, message_id: str) -> str:
+    """The indexed body text for an article, or empty string if none stored."""
+    row = conn.execute(
+        "SELECT body FROM articles_fts WHERE message_id = ?", (message_id,)
+    ).fetchone()
+    return row["body"] if row else ""
+
+
 def set_star(conn: sqlite3.Connection, message_id: str, starred: bool) -> None:
     conn.execute(
         "UPDATE articles SET starred = ? WHERE message_id = ?",
@@ -257,6 +328,34 @@ def set_read(conn: sqlite3.Connection, message_id: str, read: bool) -> None:
         "UPDATE articles SET read = ? WHERE message_id = ?",
         (int(read), message_id),
     )
+
+
+def set_dismissed(conn: sqlite3.Connection, message_ids: list[str], dismissed: bool) -> None:
+    """Ignore (or un-ignore) articles in the Reader (ADR 0008).
+
+    Deliberately touches neither ``read`` nor ``feedback``: ignoring is not a
+    judgement on the score, so it must never reach scorer calibration.
+    """
+    conn.executemany(
+        "UPDATE articles SET dismissed = ? WHERE message_id = ?",
+        [(int(dismissed), mid) for mid in message_ids],
+    )
+
+
+def dismiss_backlog(conn: sqlite3.Connection, before: str, max_score: float) -> list[str]:
+    """Ignore every queued article dated before ``before`` scoring under ``max_score``.
+
+    Returns the affected ids so the caller can offer an undo. Unscored rows count
+    as low.
+    """
+    rows = conn.execute(
+        f"SELECT message_id FROM articles WHERE {_QUEUED} "
+        "AND date < ? AND COALESCE(score, 0) < ?",
+        (before, max_score),
+    ).fetchall()
+    ids = [r["message_id"] for r in rows]
+    set_dismissed(conn, ids, True)
+    return ids
 
 
 def set_feedback(
@@ -328,8 +427,38 @@ def _tags_by_message(conn: sqlite3.Connection, message_ids: list[str]) -> dict[s
     return out
 
 
+def _reading_minutes_by_message(
+    conn: sqlite3.Connection, message_ids: list[str]
+) -> dict[str, int]:
+    """Reading estimate per article, derived from the stored FTS body on read so
+    it needs no schema column and covers every existing article for free."""
+    if not message_ids:
+        return {}
+    placeholders = ",".join("?" * len(message_ids))
+    rows = conn.execute(
+        f"SELECT message_id, body FROM articles_fts WHERE message_id IN ({placeholders})",
+        message_ids,
+    ).fetchall()
+    return {r["message_id"]: _reading_minutes(r["body"] or "") for r in rows}
+
+
+def _summary_ids(conn: sqlite3.Connection, message_ids: list[str]) -> set[str]:
+    """The subset of ``message_ids`` that have a stored long-form summary."""
+    if not message_ids:
+        return set()
+    placeholders = ",".join("?" * len(message_ids))
+    rows = conn.execute(
+        f"SELECT message_id FROM article_summaries WHERE message_id IN ({placeholders})",
+        message_ids,
+    ).fetchall()
+    return {r["message_id"] for r in rows}
+
+
 def _rows_to_articles(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list[Article]:
-    tags = _tags_by_message(conn, [r["message_id"] for r in rows])
+    ids = [r["message_id"] for r in rows]
+    tags = _tags_by_message(conn, ids)
+    summarized = _summary_ids(conn, ids)
+    minutes = _reading_minutes_by_message(conn, ids)
     return [
         Article(
             message_id=r["message_id"],
@@ -349,6 +478,9 @@ def _rows_to_articles(conn: sqlite3.Connection, rows: list[sqlite3.Row]) -> list
             url=r["url"] or "",
             source=r["source"] or "gmail",
             tags=tags.get(r["message_id"], []),
+            has_summary=r["message_id"] in summarized,
+            reading_minutes=minutes.get(r["message_id"], 0),
+            dismissed=bool(r["dismissed"]),
         )
         for r in rows
     ]
@@ -408,6 +540,64 @@ def list_saved(conn: sqlite3.Connection) -> list[Article]:
         f"{_SELECT} WHERE source = 'url' ORDER BY date DESC, score DESC"
     ).fetchall()
     return _rows_to_articles(conn, rows)
+
+
+# An article still waiting in the Reader queue.
+_QUEUED = "read = 0 AND COALESCE(dismissed, 0) = 0"
+
+
+def _date_bounds(on_or_after: str | None, before: str | None) -> tuple[str, list[str]]:
+    clauses, params = [], []
+    if on_or_after is not None:
+        clauses.append("date >= ?")
+        params.append(on_or_after)
+    if before is not None:
+        clauses.append("date < ?")
+        params.append(before)
+    return "".join(f" AND {c}" for c in clauses), params
+
+
+def list_unread(
+    conn: sqlite3.Connection,
+    limit: int = 100,
+    *,
+    on_or_after: str | None = None,
+    before: str | None = None,
+) -> list[Article]:
+    """The Reader queue (ADR 0006/0008): unread, un-ignored articles, newest first.
+
+    Ordered ``date`` desc then ``score`` desc so a day's must-reads lead that day,
+    and capped so the whole unread backlog isn't shipped to the phone at once.
+    """
+    bounds, params = _date_bounds(on_or_after, before)
+    rows = conn.execute(
+        f"{_SELECT} WHERE {_QUEUED}{bounds} ORDER BY date DESC, score DESC LIMIT ?",
+        (*params, limit),
+    ).fetchall()
+    return _rows_to_articles(conn, rows)
+
+
+def count_unread(
+    conn: sqlite3.Connection, *, on_or_after: str | None = None, before: str | None = None
+) -> int:
+    bounds, params = _date_bounds(on_or_after, before)
+    return conn.execute(
+        f"SELECT COUNT(*) FROM articles WHERE {_QUEUED}{bounds}", params
+    ).fetchone()[0]
+
+
+def latest_digest_date(conn: sqlite3.Connection) -> str | None:
+    """Date of the most recent digest — the Reader's "Today" (ADR 0008).
+
+    Saved URLs are dated when captured, so they would otherwise pull "Today"
+    forward past the last newsletter run; they only count when there is no
+    Gmail article at all.
+    """
+    for where in ("source = 'gmail' AND date != ''", "date != ''"):
+        row = conn.execute(f"SELECT MAX(date) FROM articles WHERE {where}").fetchone()
+        if row[0]:
+            return row[0]
+    return None
 
 
 def search(conn: sqlite3.Connection, query: str, limit: int = 200) -> list[Article]:
@@ -480,14 +670,20 @@ def state_map(conn: sqlite3.Connection) -> dict[str, dict]:
     non-default rows are returned to keep the payload small.
     """
     rows = conn.execute(
-        "SELECT message_id, read, starred, feedback FROM articles "
-        "WHERE read = 1 OR starred = 1 OR feedback IS NOT NULL"
+        "SELECT a.message_id, a.read, a.starred, a.feedback, a.dismissed, "
+        "       (s.message_id IS NOT NULL) AS has_summary "
+        "FROM articles a "
+        "LEFT JOIN article_summaries s ON s.message_id = a.message_id "
+        "WHERE a.read = 1 OR a.starred = 1 OR a.feedback IS NOT NULL OR a.dismissed = 1 "
+        "   OR s.message_id IS NOT NULL"
     ).fetchall()
     return {
         r["message_id"]: {
             "read": bool(r["read"]),
             "starred": bool(r["starred"]),
             "feedback": r["feedback"],
+            "dismissed": bool(r["dismissed"]),
+            "summary": bool(r["has_summary"]),
         }
         for r in rows
     }

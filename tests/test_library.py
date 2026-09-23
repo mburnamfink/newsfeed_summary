@@ -289,3 +289,148 @@ def test_state_map_only_returns_nondefault_rows(conn):
     assert state["starred"]["starred"] is True
     assert state["reacted"]["feedback"] == "up"
     assert state["reacted"]["read"] is True
+
+
+# --- long-form summaries (ADR 0007) -----------------------------------------
+
+
+def test_set_and_get_summary_roundtrip(conn):
+    _add(conn, "m1")
+    library.set_summary(conn, "m1", "## Long summary\n\nBody.",
+                        model="claude-opus-4-8", source="body", word_count=3)
+    s = library.get_summary(conn, "m1")
+    assert s["summary_md"] == "## Long summary\n\nBody."
+    assert s["model"] == "claude-opus-4-8"
+    assert s["source"] == "body"
+    assert s["word_count"] == 3
+    assert s["created_at"]  # timestamp stamped
+
+
+def test_get_summary_absent_is_none(conn):
+    _add(conn, "m1")
+    assert library.get_summary(conn, "m1") is None
+
+
+def test_set_summary_replaces_existing(conn):
+    _add(conn, "m1")
+    library.set_summary(conn, "m1", "first", model="a", source="body", word_count=1)
+    library.set_summary(conn, "m1", "second", model="b", source="url", word_count=1)
+    s = library.get_summary(conn, "m1")
+    assert s["summary_md"] == "second"
+    assert s["source"] == "url"
+
+
+def test_has_summary_flag_on_article(conn):
+    _add(conn, "m1")
+    _add(conn, "m2")
+    library.set_summary(conn, "m1", "s", model="a", source="body", word_count=1)
+    assert library.get_article(conn, "m1").has_summary is True
+    assert library.get_article(conn, "m2").has_summary is False
+
+
+def test_summary_survives_reupsert(conn):
+    """A digest re-run's upsert must not clobber a stored summary (own table)."""
+    _add(conn, "m1")
+    library.set_summary(conn, "m1", "keep me", model="a", source="body", word_count=2)
+    _add(conn, "m1", subject="Re-scored subject", score=3.0)  # simulate re-run
+    assert library.get_summary(conn, "m1")["summary_md"] == "keep me"
+
+
+def test_state_map_reports_summary_flag(conn):
+    _add(conn, "only_summary")
+    library.set_summary(conn, "only_summary", "s", model="a", source="body", word_count=1)
+    state = library.state_map(conn)
+    assert state["only_summary"]["summary"] is True  # summarized-only rows appear
+
+
+def test_get_body_roundtrip(conn):
+    _add(conn, "m1")
+    library.set_body(conn, "m1", "the full article text")
+    assert library.get_body(conn, "m1") == "the full article text"
+    assert library.get_body(conn, "absent") == ""
+
+
+def test_reading_minutes_derived_from_body(conn):
+    _add(conn, "m1")
+    library.set_body(conn, "m1", " ".join(["word"] * 1200))  # 1200 / 200 wpm
+    assert library.get_article(conn, "m1").reading_minutes == 6
+
+
+def test_reading_minutes_zero_without_body(conn):
+    _add(conn, "m1")
+    assert library.get_article(conn, "m1").reading_minutes == 0
+
+
+# --- triage: dismissed state and today/backlog split (ADR 0008) ---------------
+
+
+def test_dismiss_removes_from_unread_without_marking_read(conn):
+    _add(conn, "m1")
+    _add(conn, "m2")
+    library.set_dismissed(conn, ["m1"], True)
+    assert [a.message_id for a in library.list_unread(conn)] == ["m2"]
+    m1 = library.get_article(conn, "m1")
+    assert m1.dismissed is True
+    assert m1.read is False
+    assert m1.feedback is None
+
+
+def test_undismiss_restores_to_unread(conn):
+    _add(conn, "m1")
+    library.set_dismissed(conn, ["m1"], True)
+    library.set_dismissed(conn, ["m1"], False)
+    assert [a.message_id for a in library.list_unread(conn)] == ["m1"]
+
+
+def test_upsert_preserves_dismissed(conn):
+    _add(conn, "m1")
+    library.set_dismissed(conn, ["m1"], True)
+    _add(conn, "m1", score=9.0)
+    assert library.get_article(conn, "m1").dismissed is True
+
+
+def test_latest_digest_date_prefers_gmail(conn):
+    _add(conn, "g1", date="2026-05-10")
+    _add(conn, "u1", date="2026-05-12", source="url")
+    assert library.latest_digest_date(conn) == "2026-05-10"
+
+
+def test_latest_digest_date_falls_back_to_any_source(conn):
+    assert library.latest_digest_date(conn) is None
+    _add(conn, "u1", date="2026-05-12", source="url")
+    assert library.latest_digest_date(conn) == "2026-05-12"
+
+
+def test_list_unread_date_bounds(conn):
+    _add(conn, "old", date="2026-05-09")
+    _add(conn, "new", date="2026-05-10")
+    assert [a.message_id for a in library.list_unread(conn, on_or_after="2026-05-10")] == ["new"]
+    assert [a.message_id for a in library.list_unread(conn, before="2026-05-10")] == ["old"]
+
+
+def test_count_unread_before(conn):
+    _add(conn, "a", date="2026-05-08")
+    _add(conn, "b", date="2026-05-09")
+    _add(conn, "c", date="2026-05-10")
+    library.set_dismissed(conn, ["a"], True)
+    assert library.count_unread(conn, before="2026-05-10") == 1
+
+
+def test_dismiss_backlog_only_touches_low_scored_unread_backlog(conn):
+    _add(conn, "low_old", date="2026-05-09", score=3.0)
+    _add(conn, "null_old", date="2026-05-09", score=None)
+    _add(conn, "high_old", date="2026-05-09", score=8.0)
+    _add(conn, "low_read", date="2026-05-09", score=2.0)
+    library.set_read(conn, "low_read", True)
+    _add(conn, "low_today", date="2026-05-10", score=1.0)
+    ids = library.dismiss_backlog(conn, before="2026-05-10", max_score=5.0)
+    assert sorted(ids) == ["low_old", "null_old"]
+    assert library.get_article(conn, "high_old").dismissed is False
+    assert library.get_article(conn, "low_read").dismissed is False
+    assert library.get_article(conn, "low_today").dismissed is False
+
+
+def test_state_map_reports_dismissed(conn):
+    _add(conn, "m1")
+    library.set_dismissed(conn, ["m1"], True)
+    assert library.state_map(conn)["m1"]["dismissed"] is True

@@ -1,6 +1,8 @@
 from dataclasses import dataclass, field
 from datetime import datetime
 
+from .reading import reading_minutes as _reading_minutes
+
 
 @dataclass
 class Email:
@@ -42,6 +44,10 @@ class ScoredEmail:
         elif self.interest_score >= 4:
             return "medium"
         return "low"
+
+    @property
+    def reading_minutes(self) -> int:
+        return _reading_minutes(self.email.body)
 
 
 @dataclass

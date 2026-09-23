@@ -116,6 +116,8 @@ newsfeed --foreground       # stay attached to the terminal (see progress live)
 newsfeed --no-open          # don't launch a browser; implies --foreground (cron / headless)
 
 newsfeed add <url>          # save an article from a URL into the Library (see below)
+newsfeed summarize <url>    # write a 1000-2000 word summary of an article or URL (see below)
+newsfeed summarize <id>     # summarize an already-stored article by its message_id
 newsfeed migrate            # one-time: backfill articles.db from existing digests/archives
 newsfeed retag --all        # (re)tag stored articles against your tags: vocabulary
 newsfeed retag --since 2026-06-01
@@ -150,6 +152,32 @@ playwright install chromium
 ```
 
 Without it, `add` still captures static pages and warns when a page needs a browser.
+
+### Long-form summaries
+
+When an article is too long or too verbose to read in full, generate a faithful **1000-2000
+word summary** of it with a strong model (Opus 4.8 by default, on your subscription) — see
+[ADR 0007](docs/adr/0007-long-form-summaries.md):
+
+```bash
+newsfeed summarize https://example.com/some-long-essay   # a URL (fetched, then summarized)
+newsfeed summarize <message_id>                           # an article already in the Library
+```
+
+Or tap **📄 Summarize** on any card in the Reader, the Library, or a digest. The summary
+persists in `articles.db` and thereafter shows as **📄 Summary** wherever that article
+appears, readable at `/reader/summary/<message_id>`. Summarizing runs in the background
+(logs to `logs/newsfeed-summarize-<timestamp>.log`); pass `--foreground` to watch it.
+
+For a source that carries only a teaser — e.g. Phenomenal World posting the first few
+paragraphs of a longer piece — summarizing re-fetches the full text from the article's URL
+first when the stored body is too thin. Override the model in `preferences.yaml`:
+
+```yaml
+summary:
+  backend: subscription     # or 'api' (per-token billing)
+  model: claude-opus-4-8
+```
 
 By default `newsfeed` **detaches to the background** so your terminal returns immediately, logs
 to `logs/newsfeed-<date>.log`, and opens the finished digest in a browser. It opens the digest
@@ -202,6 +230,35 @@ backed by `articles.db`:
 - `POST /api/tag` `{message_id, tag, op}` — add / remove / clear a reader tag correction
 
 > The server binds `0.0.0.0:8080` with no authentication — intended for a trusted home LAN.
+
+### The Reader (phone/tablet app)
+
+`GET /reader` is a mobile-first, **installable** reading app (see
+[ADR 0006](docs/adr/0006-mobile-reader-app.md), [ADR 0008](docs/adr/0008-reader-triage.md)).
+It triages your queue one card at a time — the latest digest first, best-scored first, then
+optionally the older backlog:
+
+- **Ignore** (or swipe left) — out of the queue for good, without marking it read or
+  affecting scoring.
+- **Later** — to the back of this session's queue.
+- **Read →** (or swipe right) — opens the article *in place*, resized to fit the phone while
+  keeping the newsletter's formatting (`Aa` switches to a clean reader view).
+- **👎 / ✓ / 👍** — rate from the card or the article; marks it read and advances. **★** stars.
+- Every step shows an **Undo** toast. When today's digest is done you can ignore the
+  low-scored backlog in one tap. Keyboard: `x` `s` `Enter` `1` `2` `3` `*` `u` `Esc`.
+
+- `GET /reader` — the app shell
+- `GET /api/queue?limit=100` — `{digest_date, today, backlog, backlog_count}`
+- `POST /api/dismiss {message_id | message_ids, dismissed}`,
+  `POST /api/dismiss-backlog {max_score}` — ignore / un-ignore
+- `GET /reader/article/<message_id>` — one archive re-served for the phone (`?mode=reader`
+  for the clean-text fallback)
+- `GET /manifest.webmanifest`, `/sw.js` — PWA assets for "Add to Home Screen"
+
+**Install on Android:** open `https://<host>.<tailnet>.ts.net/reader` over Tailscale
+(ADR 0004) in Chrome → ⋮ → **Install app**. It then launches in its own window, separate from
+your browser tabs. Install needs the HTTPS (Tailscale) origin; over plain-`http` LAN the
+Reader still runs, but Chrome won't offer to install it.
 
 ## The Library
 

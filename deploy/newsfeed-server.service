@@ -16,6 +16,9 @@ Wants=network-online.target
 
 [Service]
 WorkingDirectory=%h/dev/newsfeed_summary
+# Required by config.py (ADR 0003): the data root is taken only from this var,
+# never cwd, so a mislaunched run can't create and back up an empty articles.db.
+Environment=NEWSFEED_HOME=%h/dev/newsfeed_summary
 ExecStart=%h/work/bin/python -m newsfeed.server
 Restart=on-failure
 RestartSec=5

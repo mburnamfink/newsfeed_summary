@@ -11,6 +11,7 @@ _TEMPLATE = """\
 {%- endmacro -%}
 {%- macro reactions() -%}
       <div class="item-actions">
+        <button class="summary" onclick="summarize(this)" title="Long-form summary">📄 Summarize</button>
         <button class="star" onclick="toggleStar(this)" title="Star to follow up later">★</button>
         <button class="react react-down" data-sentiment="down" onclick="rate(this)" title="Not interested — rank lower">👎</button>
         <button class="react react-confirm" data-sentiment="confirmed" onclick="rate(this)" title="Read it — score was right">✓ Read &amp; right</button>
@@ -93,6 +94,7 @@ _TEMPLATE = """\
     .medium-subject { color: #222; }
     .medium-subject a { color: inherit; text-decoration: none; }
     .medium-subject a:hover { text-decoration: underline; }
+    .medium-read { color: #999; font-size: 0.85rem; }
     .medium-summary { color: #555; display: block; margin-top: 2px; }
 
     /* Low interest list */
@@ -129,6 +131,13 @@ _TEMPLATE = """\
     }
     .star:hover { background: #ececec; }
     .star.active { background: #f6b40a; border-color: transparent; color: #222; font-weight: bold; }
+    .summary {
+      padding: 3px 10px; font-size: 0.85rem; cursor: pointer;
+      border: 1px solid #ccc; border-radius: 4px; background: #f5f5f5; color: #555;
+    }
+    .summary:hover { background: #ececec; }
+    .summary.has-summary { background: #eef4f0; border-color: #bcd6c8; color: #2a5b45; font-weight: bold; }
+    .summary:disabled { opacity: 0.7; cursor: default; }
 
     /* Tag chips */
     .chips { margin-top: 8px; display: flex; flex-wrap: wrap; gap: 5px; align-items: center; }
@@ -161,6 +170,7 @@ _TEMPLATE = """\
         <span class="badge badge-high">{{ "%.1f"|format(item.interest_score) }}</span>
         {{ paywall(item.email) }}
         &nbsp;·&nbsp; {{ item.topic }}
+        {%- if item.reading_minutes %} &nbsp;·&nbsp; {{ item.reading_minutes }} min read{% endif %}
       </div>
       <div class="card-summary">{{ item.summary or item.one_line }}</div>
       {{ chips(item) }}
@@ -180,6 +190,7 @@ _TEMPLATE = """\
       <span class="badge badge-medium">{{ "%.1f"|format(item.interest_score) }}</span>
       {{ paywall(item.email) }}
       &nbsp; <span class="medium-subject"><a href="{{ item.email.archive_path or item.email.url or 'https://mail.google.com/mail/u/0/#all/' ~ item.email.message_id }}" target="_blank" rel="noopener">{{ item.email.subject }}</a></span>
+      {%- if item.reading_minutes %} <span class="medium-read">&middot; {{ item.reading_minutes }} min read</span>{% endif %}
       <span class="medium-summary">{{ item.summary or item.one_line }}</span>
       {{ chips(item) }}
       {{ reactions() }}
@@ -214,11 +225,16 @@ async function loadState() {
     const state = await r.json();
     Object.entries(state).forEach(([id, s]) => {
       document.querySelectorAll('[data-msgid="' + id.replace(/"/g, '\\"') + '"]').forEach(el => {
-        if (s.read) el.classList.add('is-read');
+        if (s.read || s.dismissed) el.classList.add('is-read');
         if (s.starred) el.querySelectorAll('.star').forEach(b => b.classList.add('active'));
         if (s.feedback) {
           el.querySelectorAll('.react').forEach(b =>
             b.classList.toggle('active', b.dataset.sentiment === s.feedback));
+        }
+        if (s.summary) {
+          el.querySelectorAll('.summary').forEach(b => {
+            b.classList.add('has-summary'); b.textContent = '📄 Summary';
+          });
         }
       });
     });
@@ -283,6 +299,25 @@ async function addTag(btn) {
   if (await post('/api/tag', {message_id: item.dataset.msgid, tag, op: 'add'})) {
     location.reload();
   }
+}
+
+// Long-form summary (ADR 0007). First tap generates and stores it; a second tap
+// opens it — keeping window.open inside a user gesture so it isn't popup-blocked.
+async function summarize(btn) {
+  const item = btn.closest('[data-msgid]');
+  if (!item) return;
+  const id = item.dataset.msgid;
+  if (btn.classList.contains('has-summary')) {
+    window.open('/reader/summary/' + encodeURIComponent(id), '_blank', 'noopener');
+    return;
+  }
+  btn.disabled = true;
+  btn.textContent = '⏳ Summarizing…';
+  const ok = await post('/api/summarize', {message_id: id});
+  btn.disabled = false;
+  if (!ok) { btn.textContent = '⚠️ Retry'; return; }
+  btn.classList.add('has-summary');
+  btn.textContent = '📄 Summary';
 }
 
 loadState();
