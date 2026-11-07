@@ -10,6 +10,7 @@ GET (HTML):
   /library                    landing: search box + tag/author facets
   /library?starred=1          the starred shelf
   /library?source=url         articles saved from the web (newsfeed add)
+  /library/summaries          long-form summaries, grouped by the day written
   /library/author/<sender>    one author's articles, newest first
   /library/tag/<tag>          every article with that effective tag
   /library/search?q=<terms>   FTS keyword search over bodies
@@ -22,6 +23,7 @@ POST (JSON body, JSON response) — all write to articles.db under a lock:
   /api/star       {message_id, starred}       curated-shelf toggle
   /api/tag        {message_id, tag, op}        reader tag overlay (add|remove|clear)
   /api/summarize  {message_id}                generate + store a long-form summary
+  /api/add        {url}                       save a URL into the Library (ADR 0005)
 """
 import asyncio
 import json
@@ -34,9 +36,10 @@ from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
-from . import deep_summary, library, library_pages, reader_page
-from .config import paths, server_port
+from . import capture, deep_summary, library, library_pages, reader_page
+from .config import load_llm_config, load_preferences, paths, server_port
 from .library import Article
+from .llm import build_backend
 
 logger = logging.getLogger(__name__)
 
@@ -209,12 +212,15 @@ def serve(
                     elif query.get("source") == ["url"]:
                         html = library_pages.render_list(
                             "📌 Saved", library.list_saved(conn),
-                            "Articles you saved from the web with `newsfeed add`.",
+                            "Articles you saved from the web.",
+                            save_box=True,
                         )
                     else:
                         html = library_pages.render_home(
                             library.author_facets(conn), library.tag_facets(conn)
                         )
+                elif path == "/library/summaries":
+                    html = library_pages.render_summaries(library.list_summarized(conn))
                 elif path == "/library/search":
                     q = (query.get("q") or [""])[0]
                     results = library.search(conn, q) if q else []
@@ -256,6 +262,7 @@ def serve(
                 "/api/dismiss-backlog": self._handle_dismiss_backlog,
                 "/api/tag": self._handle_tag,
                 "/api/summarize": self._handle_summarize,
+                "/api/add": self._handle_add,
             }
             handler = handlers.get(self.path)
             if handler is None:
@@ -361,6 +368,42 @@ def serve(
                 "model": result.model,
                 "source": result.source,
                 "word_count": result.word_count,
+            })
+
+        def _handle_add(self, body: dict) -> None:
+            url = str(body.get("url") or "").strip()
+            if not url.startswith(("http://", "https://")):
+                self.send_error(400, "Required: url (http:// or https://)")
+                return
+            # Fetch/render + LLM scoring take tens of seconds; run them off the
+            # write lock (as /api/summarize does) and lock only for the upsert.
+            conn = _connect()
+            try:
+                rows = library.calibration_rows(conn)
+            finally:
+                conn.close()
+            try:
+                preferences = load_preferences(p.preferences)
+                backend = build_backend(load_llm_config(p.preferences))
+                scored, target_date = asyncio.run(
+                    capture.prepare(url, p, preferences, backend, rows))
+            except ValueError as e:
+                self.send_error(422, f"Could not save: {e}")
+                return
+            except Exception as e:
+                logger.exception("Capture failed for %s", url)
+                self.send_error(502, f"Capture failed: {e}")
+                return
+            self._write(lambda c: capture.store(c, scored, target_date))
+            email = scored.email
+            self._ok({
+                "ok": True,
+                "message_id": email.message_id,
+                "subject": email.subject,
+                "sender_name": email.sender_name,
+                "score": scored.interest_score,
+                "tags": scored.tags,
+                "archive_path": email.archive_path,
             })
 
         def _write(self, fn: Callable[[sqlite3.Connection], None]) -> None:

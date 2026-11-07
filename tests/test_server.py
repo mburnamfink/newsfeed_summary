@@ -360,3 +360,88 @@ def test_pwa_assets_served(live_server):
     assert json.loads(manifest)["display"] == "standalone"
     assert _get(base, "/sw.js")[0] == 200
     assert _get(base, "/reader/icon.svg")[0] == 200
+
+
+def _stub_capture(monkeypatch, prepare):
+    from newsfeed import capture
+    monkeypatch.setattr(server, "load_preferences", lambda _p: None)
+    monkeypatch.setattr(server, "load_llm_config", lambda _p: {})
+    monkeypatch.setattr(server, "build_backend", lambda _c: None)
+    monkeypatch.setattr(capture, "prepare", prepare)
+
+
+def test_add_endpoint_saves_starred_article(live_server, monkeypatch):
+    from datetime import date, datetime
+
+    from newsfeed.models import Email, ScoredEmail
+
+    async def fake_prepare(url, p, preferences, backend, rows):
+        email = Email(
+            message_id="url-abc123", subject="A saved essay", sender_name="Some Blog",
+            sender_email="", date=datetime(2026, 11, 7, 9, 0), body="essay text here",
+            source="url", url=url,
+            archive_path="/archive/2026-11-07/url-abc123/index.html",
+        )
+        return ScoredEmail(email=email, interest_score=6.5, topic="tech", one_line="An essay.",
+                           summary="An essay.", tags=["technology"]), date(2026, 11, 7)
+
+    _stub_capture(monkeypatch, fake_prepare)
+    base, db_path = live_server
+    status, body = _post(base, "/api/add", {"url": "https://blog.example.com/essay"})
+    assert status == 200
+    payload = json.loads(body)
+    assert payload["message_id"] == "url-abc123"
+    assert payload["subject"] == "A saved essay"
+
+    conn = library.connect(db_path)
+    saved = [a.message_id for a in library.list_saved(conn)]
+    starred = [a.message_id for a in library.list_starred(conn)]
+    conn.close()
+    assert "url-abc123" in saved and "url-abc123" in starred
+
+
+def test_add_endpoint_rejects_non_http(live_server):
+    base, _ = live_server
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _post(base, "/api/add", {"url": "javascript:alert(1)"})
+    assert e.value.code == 400
+
+
+def test_add_endpoint_unextractable_is_422(live_server, monkeypatch):
+    async def fail(*_a, **_k):
+        raise ValueError("no main content")
+
+    _stub_capture(monkeypatch, fail)
+    base, _ = live_server
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _post(base, "/api/add", {"url": "https://example.com/empty"})
+    assert e.value.code == 422
+
+
+def test_saved_shelf_and_home_show_save_box(live_server):
+    base, _ = live_server
+    for path in ("/library", "/library?source=url"):
+        _, html = _get(base, path)
+        assert 'onsubmit="saveUrl(this)' in html
+
+
+def test_summaries_tab_groups_by_day_written(live_server):
+    base, db_path = live_server
+    conn = library.connect(db_path)
+    library.set_summary(conn, "m1", "# Long\n\nbody", model="fake-opus", source="body",
+                        word_count=1500)
+    conn.commit()
+    conn.close()
+    _, html = _get(base, "/library/summaries")
+    assert "AI slop rising" in html
+    assert "Solarpunk futures" not in html  # no summary → not listed
+    assert "1,500-word summary" in html
+    assert 'class="day"' in html
+    _, home = _get(base, "/library")
+    assert 'href="/library/summaries"' in home
+
+
+def test_summaries_tab_empty(live_server):
+    base, _ = live_server
+    _, html = _get(base, "/library/summaries")
+    assert "No summaries yet" in html

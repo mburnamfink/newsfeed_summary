@@ -139,6 +139,12 @@ that entry in place rather than duplicating it. Saved articles are auto-**starre
 also back up to Drive, ADR 0003) and browsable at
 [`/library?source=url`](http://localhost:8080/library?source=url).
 
+You can also save from any browser on the tailnet: paste a URL into the **📌 Save** box on
+the Library home or the Saved shelf, or tap **📌 Save URL** in the Reader's top bar (it offers
+the clipboard's link if there is one). Both `POST /api/add {url}`, which runs the identical
+pipeline on the server and answers in ~30–60 s. Server-side saves skip the immediate Drive
+backup; the next daily run picks them up.
+
 Like the daily digest, `add` **detaches to the background** so your terminal returns immediately;
 fetch/render/scoring progress goes to `logs/newsfeed-add-<timestamp>.log`. Pass `--foreground` to
 stay attached and watch it run (also the fallback where `fork` isn't available).
@@ -166,7 +172,9 @@ newsfeed summarize <message_id>                           # an article already i
 
 Or tap **📄 Summarize** on any card in the Reader, the Library, or a digest. The summary
 persists in `articles.db` and thereafter shows as **📄 Summary** wherever that article
-appears, readable at `/reader/summary/<message_id>`. Summarizing runs in the background
+appears, readable at `/reader/summary/<message_id>`. Every summary is also listed on the
+Library's **📄 Summaries** tab ([`/library/summaries`](http://localhost:8080/library/summaries)),
+grouped by the day it was written, newest first. Summarizing runs in the background
 (logs to `logs/newsfeed-summarize-<timestamp>.log`); pass `--foreground` to watch it.
 
 For a source that carries only a teaser — e.g. Phenomenal World posting the first few

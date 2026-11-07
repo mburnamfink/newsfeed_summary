@@ -247,6 +247,8 @@ READER_HTML = r"""<!DOCTYPE html>
             color:var(--muted); font-size:.85rem; margin-bottom:12px; }
   .topbar .counter { font-weight:600; color:var(--ink); }
   .topbar a { color:var(--muted); text-decoration:none; }
+  .topbar .save-url { background:none; border:1px solid var(--line); border-radius:8px;
+                      padding:2px 9px; margin-right:12px; color:var(--muted); font-size:.85rem; }
   .progress { height:3px; background:var(--line); border-radius:2px; margin:-4px 0 12px; overflow:hidden; }
   .progress div { height:100%; background:var(--brand); transition:width .25s; }
   .card { position:relative; background:var(--card); border:1px solid var(--line); border-radius:16px;
@@ -333,7 +335,7 @@ READER_HTML = r"""<!DOCTYPE html>
 
 <template id="tpl-card">
   <div id="card-screen">
-    <div class="topbar"><span class="counter"></span><a href="/library">Library ↗</a></div>
+    <div class="topbar"><span class="counter"></span><span><button type="button" class="save-url" onclick="saveUrl()">📌 Save URL</button><a href="/library">Library ↗</a></span></div>
     <div class="progress"><div></div></div>
     <div class="card">
       <div class="stamp stamp-ignore">IGNORE</div>
@@ -417,6 +419,19 @@ function toast(text, undoable) {
 }
 function hideToast(){ document.getElementById('toast').classList.remove('show'); }
 document.querySelector('#toast button').onclick = () => undo();
+
+// ---- save a URL (POST /api/add) ---------------------------------------------
+async function saveUrl() {
+  let guess = '';
+  try { const c = (await navigator.clipboard.readText()).trim(); if (/^https?:\/\//.test(c)) guess = c; } catch (_) {}
+  const url = (prompt('Save article by URL:', guess) || '').trim();
+  if (!url) return;
+  if (!/^https?:\/\//.test(url)) { toast('⚠️ Needs an http(s):// URL', false); return; }
+  toast('⏳ Saving — fetching and scoring…', false);
+  clearTimeout(toastTimer);  // keep it up until the save finishes
+  const a = await post('/api/add', {url});
+  toast(a ? `📌 Saved: ${a.subject}` : '⚠️ Could not save that URL', false);
+}
 
 // ---- actions ---------------------------------------------------------------
 // Optimistic: advance immediately so swiping never waits on the network; if the

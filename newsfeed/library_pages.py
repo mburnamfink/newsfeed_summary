@@ -5,6 +5,8 @@ link through to the existing offline archives. They share the digest's serif loo
 and carry the same one-tap controls — feedback reactions, a ★ star toggle, and
 tag chips — wired to the server's write endpoints.
 """
+from datetime import datetime
+
 from jinja2 import Environment
 
 from .library import Article
@@ -24,6 +26,14 @@ _STYLE = """
          border: 1px solid #ccc; border-radius: 5px; }
   .search button { font-size: 1rem; padding: 8px 14px; border: 1px solid #ccc;
          border-radius: 5px; background: #f0f0f0; cursor: pointer; }
+  .save { margin: 0 0 24px; }
+  .save input[type=url] { font-size: 1rem; padding: 8px 10px; width: 70%;
+         border: 1px solid #ccc; border-radius: 5px; }
+  .save button { font-size: 1rem; padding: 8px 14px; border: 1px solid #ccc;
+         border-radius: 5px; background: #f0f0f0; cursor: pointer; }
+  .save button:disabled { opacity: 0.6; cursor: default; }
+  .save-status { font-size: 0.88rem; color: #666; margin-top: 6px; min-height: 1.3em; }
+  .save-status.err { color: #b4553a; }
   .facets { display: flex; gap: 40px; flex-wrap: wrap; }
   .facet { flex: 1; min-width: 240px; }
   .facet h2 { font-size: 1.05rem; }
@@ -57,6 +67,8 @@ _STYLE = """
   .star.active { background: #f6b40a; border-color: transparent; color: #222; font-weight: bold; }
   .is-read { opacity: 0.45; }
   .empty { color: #aaa; font-style: italic; }
+  h2.day { font-size: 1.05rem; color: #555; margin: 28px 0 4px;
+           border-bottom: 1px solid #ddd; padding-bottom: 4px; }
 """
 
 # One tap per control; each POSTs to the server and reflects the new state. Shared
@@ -109,11 +121,48 @@ async function summarize(btn) {
   // Second tap opens it — keeps window.open inside a user gesture (no popup block).
   btn.classList.add('has-summary'); btn.textContent = '📄 Summary';
 }
+async function saveUrl(form) {
+  const input = form.querySelector('input'), btn = form.querySelector('button');
+  const status = form.querySelector('.save-status');
+  const url = input.value.trim(); if (!url) return false;
+  btn.disabled = true; status.className = 'save-status';
+  status.textContent = '⏳ Fetching, scoring and summarizing — this takes a minute…';
+  let r = null;
+  try {
+    r = await fetch('/api/add', {method:'POST', headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({url})});
+  } catch (_) {}
+  btn.disabled = false;
+  if (!r || !r.ok) {
+    status.className = 'save-status err';
+    status.textContent = '⚠️ ' + (r ? (r.statusText || 'Save failed') : 'Network error') +
+      (r && r.status === 422 ? ' — nothing readable at that URL.' : '');
+    return false;
+  }
+  const a = await r.json();
+  input.value = '';
+  status.innerHTML = '';
+  status.append('✓ Saved ');
+  const link = document.createElement('a');
+  link.href = a.archive_path || '/library?source=url'; link.target = '_blank';
+  link.textContent = a.subject;
+  status.append(link, ` · ${a.sender_name} · score ${a.score.toFixed(1)}`);
+  return false;
+}
 """
+
+# Paste-a-URL box (POST /api/add). Shown on the Library home and the Saved shelf.
+_SAVE_BOX = (
+    '<form class="save" onsubmit="saveUrl(this); return false;">'
+    '<input type="url" name="url" placeholder="Save an article by URL…" required>'
+    '<button type="submit">📌 Save</button>'
+    '<div class="save-status" role="status"></div></form>'
+)
 
 _NAV = '<div class="nav"><a href="/">🏠 Home</a><a href="/library">📚 Library</a>' \
        '<a href="/library?starred=1">★ Starred</a>' \
-       '<a href="/library?source=url">📌 Saved</a></div>'
+       '<a href="/library?source=url">📌 Saved</a>' \
+       '<a href="/library/summaries">📄 Summaries</a></div>'
 
 _ITEM = """
     {%- macro tier_badge(a) -%}
@@ -131,6 +180,10 @@ _ITEM = """
         {%- if a.date %} &nbsp;·&nbsp; {{ a.date }}{% endif %}
         {%- if a.reading_minutes %} &nbsp;·&nbsp; {{ a.reading_minutes }} min read{% endif %}
       </div>
+      {%- if summary_meta %}{% set m = summary_meta[a.message_id] %}
+      <div class="card-meta">📄 <a href="/reader/summary/{{ a.message_id|urlencode }}" target="_blank" rel="noopener">{{ "{:,}".format(m.word_count or 0) }}-word summary</a>
+        &nbsp;·&nbsp; {{ m.model }} &nbsp;·&nbsp; {{ m.time }}</div>
+      {%- endif %}
       <div class="card-summary">{{ a.display_summary }}</div>
       <div class="chips">
         {%- for tag in a.tags %}
@@ -164,6 +217,7 @@ _HOME_BODY = (
     '<form class="search" action="/library/search" method="get">'
     '<input type="text" name="q" placeholder="Search article bodies…" autofocus>'
     '<button type="submit">Search</button></form>'
+    + _SAVE_BOX +
     '<div class="facets">'
     '<div class="facet"><h2>Tags</h2><ul>'
     '{% for tag, n in tags %}<li><a href="/library/tag/{{ tag|urlencode }}">{{ tag }}</a> '
@@ -180,6 +234,14 @@ _LIST_BODY = (
 )
 
 
+_SUMMARIES_BODY = (
+    "{% if days %}{% for day, articles in days %}"
+    '<h2 class="day">{{ day }}</h2>'
+    "{% for a in articles %}" + _ITEM + "{% endfor %}{% endfor %}"
+    '{% else %}<p class="empty">No summaries yet — tap 📄 Summarize on any article.</p>{% endif %}'
+)
+
+
 def _render_page(title: str, body_html: str, subtitle: str = "") -> str:
     return _env.from_string(_PAGE).render(title=title, subtitle=subtitle, body=body_html)
 
@@ -191,6 +253,28 @@ def render_home(
     return _render_page("Library", body)
 
 
-def render_list(title: str, articles: list[Article], subtitle: str = "") -> str:
+def render_list(
+    title: str, articles: list[Article], subtitle: str = "", *, save_box: bool = False
+) -> str:
     body = _env.from_string(_LIST_BODY).render(articles=articles)
+    if save_box:
+        body = _SAVE_BOX + body
     return _render_page(title, body, subtitle)
+
+
+def render_summaries(items: list[tuple[Article, dict]]) -> str:
+    """Long-form summaries grouped under the local day each was written, newest first."""
+    days: list[tuple[str, list[Article]]] = []
+    summary_meta: dict[str, dict] = {}
+    for a, meta in items:
+        written = datetime.fromisoformat(meta["created_at"]).astimezone()
+        label = written.strftime("%A, %B %-d, %Y")
+        if not days or days[-1][0] != label:
+            days.append((label, []))
+        days[-1][1].append(a)
+        summary_meta[a.message_id] = {**meta, "time": written.strftime("%-I:%M %p")}
+    body = _env.from_string(_SUMMARIES_BODY).render(days=days, summary_meta=summary_meta)
+    n = len(items)
+    return _render_page(
+        "📄 Summaries", body, f"{n} long-form summar{'y' if n == 1 else 'ies'}, by the day written."
+    )

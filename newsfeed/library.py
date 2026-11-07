@@ -542,6 +542,24 @@ def list_saved(conn: sqlite3.Connection) -> list[Article]:
     return _rows_to_articles(conn, rows)
 
 
+def list_summarized(conn: sqlite3.Connection) -> list[tuple[Article, dict]]:
+    """Articles with a long-form summary (ADR 0007), most recently summarized first.
+
+    Each comes with its summary's ``created_at`` (UTC ISO), ``word_count`` and ``model``.
+    """
+    rows = conn.execute(
+        "SELECT a.*, s.created_at AS s_created_at, s.word_count AS s_word_count, "
+        "       s.model AS s_model "
+        "FROM articles a JOIN article_summaries s ON s.message_id = a.message_id "
+        "ORDER BY s.created_at DESC"
+    ).fetchall()
+    meta = [
+        {"created_at": r["s_created_at"], "word_count": r["s_word_count"], "model": r["s_model"]}
+        for r in rows
+    ]
+    return list(zip(_rows_to_articles(conn, rows), meta, strict=True))
+
+
 # An article still waiting in the Reader queue.
 _QUEUED = "read = 0 AND COALESCE(dismissed, 0) = 0"
 

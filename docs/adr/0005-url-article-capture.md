@@ -52,6 +52,10 @@ through the *existing* archive → score → tag → summarize → upsert stages
   independent of the origin site for free.
 - **CLI only, for now.** Entry is `newsfeed add <url>`. A server-side form / bookmarklet
   for the tablet is a deliberate future extension, not part of this decision.
+  *Addendum (2026-11-07):* added. `POST /api/add {url}` runs the same pipeline
+  (`newsfeed/capture.py`, shared with the CLI) off the server's write lock and locks only
+  for the upsert; the Library home, Saved shelf and Reader top bar expose it. Server
+  saves don't trigger a backup; the daily run covers them.
 
 New columns `url` and `source` are added to `articles` (additive, defaulted); `connect()`
 applies them idempotently to pre-existing databases via `ALTER TABLE`. New columns aside,

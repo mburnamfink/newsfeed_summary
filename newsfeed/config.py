@@ -13,6 +13,8 @@ from pathlib import Path
 
 import yaml
 
+from .models import Preferences
+
 DEFAULT_SERVER_PORT = 8080
 
 
@@ -141,3 +143,33 @@ def ensure_anthropic_key() -> None:
     key_file = paths().anthropic_key
     if key_file.exists():
         os.environ["ANTHROPIC_API_KEY"] = key_file.read_text(encoding="utf-8").strip()
+
+
+# --- preferences.yaml (shared by the CLI and the server's /api/add) ---
+
+def _load_labels(gmail_config: dict) -> list[str]:
+    raw = gmail_config.get("labels", gmail_config.get("label", "Newsletters"))
+    if isinstance(raw, list):
+        return raw
+    return [raw]
+
+
+def load_llm_config(path: Path) -> dict:
+    with path.open() as f:
+        data = yaml.safe_load(f) or {}
+    return data.get("llm", {}) or {}
+
+
+def load_preferences(path: Path) -> Preferences:
+    with path.open() as f:
+        data = yaml.safe_load(f)
+    return Preferences(
+        gmail_labels=_load_labels(data.get("gmail", {})),
+        interests=data.get("interests", []),
+        thresholds=data.get("thresholds", {"high": 7, "medium": 4}),
+        tags=data.get("tags", []),
+        boost_sources=data.get("boost_sources", []),
+        mute_sources=data.get("mute_sources", []),
+        boost_keywords=data.get("boost_keywords", []),
+        mute_keywords=data.get("mute_keywords", []),
+    )
