@@ -30,6 +30,7 @@ import json
 import logging
 import sqlite3
 import threading
+from http.cookies import CookieError, SimpleCookie
 from collections.abc import Callable
 from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
@@ -127,7 +128,45 @@ def serve(
             if parts.path == "/library" or parts.path.startswith("/library/"):
                 self._handle_library(parts.path, parse_qs(parts.query))
                 return
+            # Archives opened directly (Library, digests) get the same per-device
+            # readable-font rewrite the Reader applies; otherwise served as stored.
+            if (parts.path.startswith("/archive/") and parts.path.endswith(".html")
+                    and self._readable_font()):
+                self._handle_archive_readable(unquote(parts.path))
+                return
             super().do_GET()
+
+        def end_headers(self) -> None:
+            # Article HTML varies with the readable-font cookie; make browsers
+            # revalidate so flipping the setting takes effect on the next open.
+            path = urlsplit(self.path).path
+            if path.startswith(("/archive/", "/reader/article/")) and not path.endswith(
+                    (".png", ".jpg", ".jpeg", ".gif", ".webp", ".svg")):
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("Vary", "Cookie")
+            super().end_headers()
+
+        def _readable_font(self) -> bool:
+            """Per-device setting, carried by a cookie the Reader/Library toggle sets."""
+            cookie = SimpleCookie()
+            try:
+                cookie.load(self.headers.get("Cookie", ""))
+            except CookieError:
+                return False
+            morsel = cookie.get(reader_page.READABLE_COOKIE)
+            return morsel is not None and morsel.value == "1"
+
+        def _handle_archive_readable(self, path: str) -> None:
+            try:
+                resolved = (serve_root / path.lstrip("/")).resolve()
+                resolved.relative_to(serve_root.resolve())
+                html = resolved.read_text(encoding="utf-8")
+            except (OSError, ValueError):
+                self.send_error(404)
+                return
+            out = reader_page.render_article(
+                html, reader_page.article_base_href(path), readable_font=True)
+            self._send(out, "text/html; charset=utf-8")
 
         def _handle_queue(self, query: dict[str, list[str]]) -> None:
             try:
@@ -174,7 +213,7 @@ def serve(
                 return
             out = reader_page.render_article(
                 html, reader_page.article_base_href(article.archive_path),
-                reader_mode=reader_mode,
+                reader_mode=reader_mode, readable_font=self._readable_font(),
             )
             self._send(out, "text/html; charset=utf-8")
 

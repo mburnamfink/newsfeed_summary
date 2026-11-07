@@ -445,3 +445,32 @@ def test_summaries_tab_empty(live_server):
     base, _ = live_server
     _, html = _get(base, "/library/summaries")
     assert "No summaries yet" in html
+
+
+def _get_with_cookie(base, path, cookie):
+    req = urllib.request.Request(base + path, headers={"Cookie": cookie})
+    with urllib.request.urlopen(req) as r:
+        return r.status, r.read().decode(), r.headers
+
+
+def test_readable_font_cookie_applies_to_reader_and_direct_archive(live_server, tmp_path):
+    base, _ = live_server
+    archive = tmp_path / "serve" / "archive" / "2026-05-10" / "m1"
+    archive.mkdir(parents=True)
+    (archive / "index.html").write_text(
+        "<html><head></head><body><p style='font-size:12px'>tiny</p></body></html>",
+        encoding="utf-8",
+    )
+    path = "/archive/2026-05-10/m1/index.html"
+
+    _, plain, headers = _get_with_cookie(base, path, "")
+    assert "font-size:12px" in plain  # served exactly as stored
+    assert headers["Cache-Control"] == "no-cache"
+
+    _, html, _ = _get_with_cookie(base, path, "other=x; nf_readable=1")
+    assert "font-size:12px" not in html and "font-size:18px" in html
+
+    _, html, _ = _get_with_cookie(base, "/reader/article/m1", "nf_readable=1")
+    assert "font-size:18px" in html
+    _, html, _ = _get_with_cookie(base, "/reader/article/m1", "nf_readable=0")
+    assert "font-size:12px" in html

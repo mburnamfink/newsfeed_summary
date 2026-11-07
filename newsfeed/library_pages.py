@@ -121,6 +121,14 @@ async function summarize(btn) {
   // Second tap opens it — keeps window.open inside a user gesture (no popup block).
   btn.classList.add('has-summary'); btn.textContent = '📄 Summary';
 }
+function readableFontOn() { return document.cookie.split('; ').includes('nf_readable=1'); }
+function labelReadableFont(a) { a.textContent = 'A⁺ Readable font: ' + (readableFontOn() ? 'on' : 'off'); }
+function toggleReadableFont(a) {
+  const on = !readableFontOn();
+  document.cookie = `nf_readable=${on ? 1 : 0}; path=/; max-age=${on ? 315360000 : 0}; SameSite=Lax`;
+  labelReadableFont(a);
+}
+document.querySelectorAll('.font-toggle').forEach(labelReadableFont);
 async function saveUrl(form) {
   const input = form.querySelector('input'), btn = form.querySelector('button');
   const status = form.querySelector('.save-status');
@@ -162,7 +170,10 @@ _SAVE_BOX = (
 _NAV = '<div class="nav"><a href="/">🏠 Home</a><a href="/library">📚 Library</a>' \
        '<a href="/library?starred=1">★ Starred</a>' \
        '<a href="/library?source=url">📌 Saved</a>' \
-       '<a href="/library/summaries">📄 Summaries</a></div>'
+       '<a href="/library/summaries">📄 Summaries</a>' \
+       '<a href="#" class="font-toggle" onclick="toggleReadableFont(this); return false;" ' \
+       'title="Clamp small type and use one font in archived articles, on this device">' \
+       'A⁺ Readable font: off</a></div>'
 
 _ITEM = """
     {%- macro tier_badge(a) -%}

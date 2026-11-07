@@ -17,6 +17,7 @@ The Archive Server serves three things from here:
 """
 import html as _html
 import posixpath
+import re
 
 import markdown as _markdown
 import trafilatura
@@ -54,13 +55,73 @@ _READER_CSS = """
 
 _VIEWPORT = '<meta name="viewport" content="width=device-width, initial-scale=1">'
 
+# ---- Readable font (per-device setting, ``nf_readable=1`` cookie) -------------
+# Newsletters often hard-code 12–14px type that is unreadable on a phone. Rather
+# than flatten every size (which would erase headings), small declared sizes are
+# clamped up to READABLE_MIN_PX in the HTML itself, and one font is imposed
+# everywhere. Done server-side because the Reader's iframe runs no scripts.
+READABLE_COOKIE = "nf_readable"
+READABLE_MIN_PX = 18
+_READABLE_FONT = "Georgia, 'Noto Serif', 'Times New Roman', serif"
+_READABLE_CSS = f"""
+  html {{ -webkit-text-size-adjust: 100% !important; text-size-adjust: 100% !important;
+    font-size: {READABLE_MIN_PX}px !important; }}
+  body {{ font-size: {READABLE_MIN_PX}px !important; }}
+  body, body * {{ font-family: {_READABLE_FONT} !important; line-height: 1.5 !important;
+    letter-spacing: normal !important; }}
+  pre, code, kbd, samp, pre * {{ font-family: ui-monospace, Menlo, Consolas, monospace !important; }}
+"""
+_FONT_SIZE_RE = re.compile(
+    r"(font-size\s*:\s*)([\d.]+)\s*(px|pt|em|rem|%)|(font-size\s*:\s*)(xx-small|x-small|small|smaller)\b",
+    re.IGNORECASE,
+)
+# The size token inside a ``font:`` shorthand (e.g. ``font: bold 12px/1.4 Arial``).
+_FONT_SHORTHAND_RE = re.compile(
+    r"(\bfont\s*:[^;{}]*?)(?<![\w.-])([\d.]+)(px|pt)\b", re.IGNORECASE)
+_PT_TO_PX = 4 / 3
 
-def render_article(archive_html: str, base_href: str, *, reader_mode: bool = False) -> str:
+
+def _clamp_px(m: re.Match) -> str:
+    value, unit = float(m.group(2)), m.group(3).lower()
+    px = value * _PT_TO_PX if unit == "pt" else value
+    return f"{m.group(1)}{READABLE_MIN_PX}px" if px < READABLE_MIN_PX else m.group(0)
+
+
+def _clamp_font_sizes(css: str) -> str:
+    """Raise every declared font-size smaller than the readable minimum."""
+    def fix(m: re.Match) -> str:
+        if m.group(4):  # keyword sizes below "medium"
+            return f"{m.group(4)}1em"
+        prefix, value, unit = m.group(1), float(m.group(2)), m.group(3).lower()
+        if unit in ("px", "pt"):
+            px = value * _PT_TO_PX if unit == "pt" else value
+            return f"{prefix}{READABLE_MIN_PX}px" if px < READABLE_MIN_PX else m.group(0)
+        # Relative sizes shrink from an already-readable parent; floor them at 1×.
+        ratio = value / 100 if unit == "%" else value
+        return f"{prefix}1{unit if unit != '%' else 'em'}" if ratio < 1 else m.group(0)
+    return _FONT_SHORTHAND_RE.sub(_clamp_px, _FONT_SIZE_RE.sub(fix, css))
+
+
+def _apply_readable_font(soup: BeautifulSoup) -> None:
+    for el in soup.find_all(style=True):
+        el["style"] = _clamp_font_sizes(el["style"])
+    for st in soup.find_all("style"):
+        if st.string:
+            st.string = _clamp_font_sizes(st.string)
+    for font in soup.find_all("font"):
+        font.attrs.pop("size", None)
+        font.attrs.pop("face", None)
+
+
+def render_article(
+    archive_html: str, base_href: str, *, reader_mode: bool = False, readable_font: bool = False
+) -> str:
     """Re-serve a stored Archive for the phone (ADR 0006).
 
     ``base_href`` is the archive's own directory (e.g. ``/archive/<date>/<id>/``);
     it becomes a ``<base>`` so the archive's relative ``images/…`` sources resolve
     even though this HTML is served from ``/reader/article/<id>``.
+    ``readable_font`` clamps small type and imposes one font (see ``_READABLE_CSS``).
     """
     if reader_mode:
         extracted = trafilatura.extract(
@@ -87,8 +148,11 @@ def render_article(archive_html: str, base_href: str, *, reader_mode: bool = Fal
     if not soup.find("meta", attrs={"name": "viewport"}):
         head.append(BeautifulSoup(_VIEWPORT, "html.parser"))
 
+    if readable_font:
+        _apply_readable_font(soup)
+
     style = soup.new_tag("style")
-    style.string = _ARTICLE_CSS
+    style.string = _ARTICLE_CSS + (_READABLE_CSS if readable_font else "")
     head.append(style)  # last, so it wins the cascade over the newsletter's own CSS
 
     return str(soup)
@@ -372,6 +436,7 @@ READER_HTML = r"""<!DOCTYPE html>
     <div class="read-head">
       <button class="icon-btn back">‹ Back</button>
       <span class="title"></span>
+      <button class="icon-btn font-toggle" title="Readable font on this device">A⁺</button>
       <button class="icon-btn reader-toggle" title="Reader view">Aa</button>
       <button class="icon-btn open-ext" title="Open original">↗</button>
     </div>
@@ -419,6 +484,12 @@ function toast(text, undoable) {
 }
 function hideToast(){ document.getElementById('toast').classList.remove('show'); }
 document.querySelector('#toast button').onclick = () => undo();
+
+// ---- readable font (per-device cookie, applied server-side) -----------------
+function readableFontOn() { return document.cookie.split('; ').includes('nf_readable=1'); }
+function setReadableFont(on) {
+  document.cookie = `nf_readable=${on ? 1 : 0}; path=/; max-age=${on ? 315360000 : 0}; SameSite=Lax`;
+}
 
 // ---- save a URL (POST /api/add) ---------------------------------------------
 async function saveUrl() {
@@ -640,6 +711,14 @@ function openReader(a, summaryMode) {
   const toggle = node.querySelector('.reader-toggle');
   toggle.onclick = () => { readerMode=!readerMode; toggle.classList.toggle('on',readerMode); load(); };
   if (!readable || summaryMode) toggle.style.display='none';
+  const fontBtn = node.querySelector('.font-toggle');
+  fontBtn.classList.toggle('on', readableFontOn());
+  fontBtn.onclick = () => {
+    const on = !readableFontOn(); setReadableFont(on); fontBtn.classList.toggle('on', on);
+    toast(on ? 'A⁺ Readable font on for this device' : 'Original fonts on this device', false);
+    load();
+  };
+  if (!readable || summaryMode) fontBtn.style.display='none';
   const ext = node.querySelector('.open-ext');
   if (a.url) ext.onclick = () => window.open(a.url, '_blank', 'noopener'); else ext.style.display='none';
 

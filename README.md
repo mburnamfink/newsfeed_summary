@@ -251,6 +251,9 @@ optionally the older backlog:
 - **Later** — to the back of this session's queue.
 - **Read →** (or swipe right) — opens the article *in place*, resized to fit the phone while
   keeping the newsletter's formatting (`Aa` switches to a clean reader view).
+- **A⁺ Readable font** — a per-device setting (cookie), also in the Library's top links. When on,
+  every archived article (in the Reader, or opened from the Library or a digest) gets one font
+  and no text smaller than 18px; larger headings keep their size. Off by default.
 - **👎 / ✓ / 👍** — rate from the card or the article; marks it read and advances. **★** stars.
 - Every step shows an **Undo** toast. When today's digest is done you can ignore the
   low-scored backlog in one tap. Keyboard: `x` `s` `Enter` `1` `2` `3` `*` `u` `Esc`.
