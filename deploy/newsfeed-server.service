@@ -7,7 +7,7 @@
 #   systemctl --user enable --now newsfeed-server
 #   loginctl enable-linger $USER   # keep running after logout / across reboots
 #
-# Tablet reaches it at http://pop-os.local:8080/ via mDNS (needs avahi-daemon).
+# Tablet reaches it at http://piehole.local:8080/ via mDNS (needs avahi-daemon).
 
 [Unit]
 Description=Newsfeed Archive Server
@@ -19,7 +19,7 @@ WorkingDirectory=%h/dev/newsfeed_summary
 # Required by config.py (ADR 0003): the data root is taken only from this var,
 # never cwd, so a mislaunched run can't create and back up an empty articles.db.
 Environment=NEWSFEED_HOME=%h/dev/newsfeed_summary
-ExecStart=%h/work/bin/python -m newsfeed.server
+ExecStart=%h/.local/bin/newsfeed-server
 Restart=on-failure
 RestartSec=5
 
