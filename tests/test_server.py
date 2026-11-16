@@ -474,3 +474,20 @@ def test_readable_font_cookie_applies_to_reader_and_direct_archive(live_server, 
     assert "font-size:18px" in html
     _, html, _ = _get_with_cookie(base, "/reader/article/m1", "nf_readable=0")
     assert "font-size:12px" in html
+
+
+def test_digest_read_round_trip(live_server):
+    base, _ = live_server
+    assert json.loads(_get(base, "/api/digest-reads")[1]) == []
+    _post(base, "/api/digest-read", {"date": "2026-05-10"})
+    _post(base, "/api/digest-read", {"date": "2026-05-11", "read": True})
+    assert json.loads(_get(base, "/api/digest-reads")[1]) == ["2026-05-11", "2026-05-10"]
+    _post(base, "/api/digest-read", {"date": "2026-05-10", "read": False})
+    assert json.loads(_get(base, "/api/digest-reads")[1]) == ["2026-05-11"]
+
+
+def test_digest_read_rejects_bad_date(live_server):
+    base, _ = live_server
+    with pytest.raises(urllib.error.HTTPError) as e:
+        _post(base, "/api/digest-read", {"date": "../etc"})
+    assert e.value.code == 400

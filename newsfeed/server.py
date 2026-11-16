@@ -24,10 +24,15 @@ POST (JSON body, JSON response) — all write to articles.db under a lock:
   /api/tag        {message_id, tag, op}        reader tag overlay (add|remove|clear)
   /api/summarize  {message_id}                generate + store a long-form summary
   /api/add        {url}                       save a URL into the Library (ADR 0005)
+  /api/digest-read {date, read=true}          tick a digest day off on the landing page
+
+GET (JSON):
+  /api/digest-reads           digest days marked read, newest first
 """
 import asyncio
 import json
 import logging
+import re
 import sqlite3
 import threading
 from http.cookies import CookieError, SimpleCookie
@@ -98,6 +103,13 @@ def serve(
                 conn = _connect()
                 try:
                     self._ok(library.state_map(conn))
+                finally:
+                    conn.close()
+                return
+            if parts.path == "/api/digest-reads":
+                conn = _connect()
+                try:
+                    self._ok(library.read_digest_dates(conn))
                 finally:
                     conn.close()
                 return
@@ -302,6 +314,7 @@ def serve(
                 "/api/tag": self._handle_tag,
                 "/api/summarize": self._handle_summarize,
                 "/api/add": self._handle_add,
+                "/api/digest-read": self._handle_digest_read,
             }
             handler = handlers.get(self.path)
             if handler is None:
@@ -330,6 +343,15 @@ def serve(
                 return
             read = bool(body.get("read", True))
             self._write(lambda c: library.set_read(c, str(message_id), read))
+            self._ok({"ok": True})
+
+        def _handle_digest_read(self, body: dict) -> None:
+            day = str(body.get("date") or "")
+            if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+                self.send_error(400, "Required: date (YYYY-MM-DD)")
+                return
+            read = bool(body.get("read", True))
+            self._write(lambda c: library.set_digest_read(c, day, read))
             self._ok({"ok": True})
 
         def _handle_star(self, body: dict) -> None:

@@ -96,6 +96,14 @@ CREATE TABLE IF NOT EXISTS article_summaries (
     word_count INTEGER,
     created_at TEXT NOT NULL
 );
+
+-- Digest days the reader has ticked off on the landing page. Keyed by the
+-- digest date (YYYY-MM-DD); presence of a row means "read". Its own table so
+-- it is independent of any per-article read flags.
+CREATE TABLE IF NOT EXISTS digest_reads (
+    date    TEXT PRIMARY KEY,
+    read_at TEXT NOT NULL
+);
 """
 
 
@@ -328,6 +336,22 @@ def set_read(conn: sqlite3.Connection, message_id: str, read: bool) -> None:
         "UPDATE articles SET read = ? WHERE message_id = ?",
         (int(read), message_id),
     )
+
+
+def set_digest_read(conn: sqlite3.Connection, day: str, read: bool) -> None:
+    """Tick (or untick) a whole digest day on the landing page."""
+    if read:
+        conn.execute(
+            "INSERT OR IGNORE INTO digest_reads (date, read_at) VALUES (?, datetime('now'))",
+            (day,),
+        )
+    else:
+        conn.execute("DELETE FROM digest_reads WHERE date = ?", (day,))
+
+
+def read_digest_dates(conn: sqlite3.Connection) -> list[str]:
+    """Digest days marked read, newest first."""
+    return [r["date"] for r in conn.execute("SELECT date FROM digest_reads ORDER BY date DESC")]
 
 
 def set_dismissed(conn: sqlite3.Connection, message_ids: list[str], dismissed: bool) -> None:

@@ -375,6 +375,10 @@ _INDEX_TEMPLATE = """<!DOCTYPE html>
     .empty { color: #aaa; font-style: italic; }
     .nav { font-size: 1rem; margin-bottom: 24px; }
     .nav a { margin-right: 16px; }
+    li label { display: inline-flex; align-items: center; cursor: pointer; }
+    li input[type=checkbox] { width: 1.15rem; height: 1.15rem; margin: 0 14px 0 0;
+                              accent-color: #2a6; cursor: pointer; }
+    li.read a { color: #999; }
   </style>
 </head>
 <body>
@@ -383,9 +387,34 @@ _INDEX_TEMPLATE = """<!DOCTYPE html>
   {% if dates %}
   <ul>
     {% for d in dates %}
-    <li><a href="/digests/{{ d }}.html">{{ d }}</a></li>
+    <li data-date="{{ d }}"><label><input type="checkbox" aria-label="Mark {{ d }} read"></label><a href="/digests/{{ d }}.html">{{ d }}</a></li>
     {% endfor %}
   </ul>
+  <script>
+  (function () {
+    var items = document.querySelectorAll("li[data-date]");
+    function paint(li, read) {
+      li.classList.toggle("read", read);
+      li.querySelector("input").checked = read;
+    }
+    fetch("/api/digest-reads").then(function (r) { return r.json(); }).then(function (dates) {
+      var read = new Set(dates);
+      items.forEach(function (li) { paint(li, read.has(li.dataset.date)); });
+    }).catch(function () {});
+    items.forEach(function (li) {
+      var box = li.querySelector("input");
+      box.addEventListener("change", function () {
+        var want = box.checked;
+        paint(li, want);
+        fetch("/api/digest-read", {
+          method: "POST", headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({date: li.dataset.date, read: want})
+        }).then(function (r) { if (!r.ok) throw r; })
+          .catch(function () { paint(li, !want); });
+      });
+    });
+  })();
+  </script>
   {% else %}
   <p class="empty">No digests yet.</p>
   {% endif %}
